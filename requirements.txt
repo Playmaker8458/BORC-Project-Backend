@@ -1,0 +1,15 @@
+# ── Runtime dependencies ────────────────────────────────────────────────────
+fastapi[standard]==0.141.1
+python-dotenv==1.2.3
+bcrypt==5.0.0
+python-jose==3.5.0
+pymongo[srv]==4.17.0
+requests==2.34.2
+cloudinary==1.46.2
+httpx==0.28.1
+slowapi==0.1.10
+
+# ── Test / dev dependencies ─────────────────────────────────────────────────
+pytest==9.1.1
+pytest-asyncio==1.4.0
+mongomock==4.3.0
