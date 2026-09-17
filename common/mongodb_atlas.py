@@ -1,6 +1,7 @@
 import logging
 import os
 
+import certifi
 from dotenv import load_dotenv
 from pymongo import MongoClient
 from pymongo.server_api import ServerApi
@@ -24,7 +25,10 @@ def get_atlas_client() -> MongoClient:
         if not uri:
             raise RuntimeError("MONGODB_ALART_CLIENT_URL is not set")
         try:
-            _client = MongoClient(uri, server_api=ServerApi("1"))
+            # tlsCAFile=certifi.where(): บาง Docker base image (เช่น python-slim บน Debian
+            # bookworm) มี CA bundle ระบบไม่ครบ/OpenSSL ต่อรอง TLS กับ Atlas ไม่ผ่าน
+            # (SSL: TLSV1_ALERT_INTERNAL_ERROR) ใช้ certifi's CA bundle แทนเพื่อความชัวร์
+            _client = MongoClient(uri, server_api=ServerApi("1"), tlsCAFile=certifi.where())
             logger.info("MongoDB Atlas client created")
         except Exception:
             logger.exception("MongoDB Atlas connection failed")
