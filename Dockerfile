@@ -2,6 +2,11 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
+# ให้ /app อยู่ใน sys.path เสมอ เพื่อให้ import "common.*" หาเจอ
+# แม้ตอนรัน python Admin/AddLoginData.py ตรง ๆ (ซึ่ง Python จะเติมแค่โฟลเดอร์ Admin/
+# เข้า sys.path[0] ให้อัตโนมัติ ไม่ใช่ /app)
+ENV PYTHONPATH=/app
+
 # ติดตั้ง dependencies ก่อน copy โค้ดทั้งหมด
 # เพื่อให้ Docker cache layer นี้ไว้ ถ้าโค้ดเปลี่ยนแต่ requirements.txt ไม่เปลี่ยน
 # จะไม่ต้องติดตั้ง library ใหม่ทุกครั้ง (build เร็วขึ้นมาก)
