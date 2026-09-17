@@ -49,29 +49,21 @@ from users.Database.ConnectDB import Connect_MongoDB
 async def booking_status_worker():
     """ตรวจและอัปเดตคิว แม้ไม่มีผู้ใช้เปิดหน้าเว็บหรือเรียก API."""
     while True:
-        client = None
         try:
-            client = Connect_MongoDB()
+            client = Connect_MongoDB()  # shared singleton (common/mongodb_atlas.py) — ห้าม close()
             auto_update_status(client["BORC"])
         except Exception:
             logging.exception("booking status worker failed")
-        finally:
-            if client:
-                client.close()
         await asyncio.sleep(30)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    client = None
     try:
-        client = Connect_MongoDB()
+        client = Connect_MongoDB()  # shared singleton (common/mongodb_atlas.py) — ห้าม close()
         ensure_booking_indexes(client["BORC"])
     except Exception:
         logging.exception("booking status worker startup failed")
-    finally:
-        if client:
-            client.close()
 
     worker = asyncio.create_task(booking_status_worker())
     try:

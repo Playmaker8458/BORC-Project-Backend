@@ -35,5 +35,3 @@ def LoginUser(request: Request):
     except Exception as e:
         logger.exception("Unhandled error")
         raise HTTPException(status_code=500, detail="Internal server error")
-    finally:
-        client.close()

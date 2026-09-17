@@ -153,5 +153,3 @@ async def AddDataProfile(
     except Exception as e:
         logger.exception("เกิดข้อผิดพลาดในระบบ: %s", e)
         raise HTTPException(status_code=500, detail="Internal server error")
-    finally:
-        myclient.close()

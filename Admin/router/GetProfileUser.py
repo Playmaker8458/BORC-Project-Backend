@@ -112,8 +112,6 @@ def update_role_user(user_id: str, update: UpdateDataUser):
     except Exception as e:
         logger.exception("Unhandled error")
         raise HTTPException(status_code=500, detail="Internal server error")
-    finally:
-        client.close()
 
 # ─────────────────────────────────────────
 #  DELETE  /Profile/{user_id}  – ลบบัญชี
@@ -154,5 +152,3 @@ def delete_user(user_id: str):
     except Exception as e:
         logger.exception("Unhandled error")
         raise HTTPException(status_code=500, detail="Internal server error")
-    finally:
-        client.close()
