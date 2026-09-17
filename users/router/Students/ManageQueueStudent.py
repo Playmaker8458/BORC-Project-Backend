@@ -1,7 +1,7 @@
 import logging
 
 logger = logging.getLogger(__name__)
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from ...Database.ConnectDB import Connect_MongoDB
 from ...auth.authUser import verify_user_token, get_user_id
 from datetime import datetime, timezone, timedelta
@@ -335,7 +335,7 @@ async def student_reschedule(request: Request, body: RescheduleRequest):
 
 # ─── DELETE /CancelBooking ────────────────────────────────────────────────────
 @router.delete('/CancelBooking')
-async def cancel_booking(request: Request, body: CancelBookingRequest):
+async def cancel_booking(request: Request, body: CancelBookingRequest, background_tasks: BackgroundTasks):
     logger.info(f" cancelReason: {body.cancelReason}")
     try:
         payload = verify_user_token(request)
@@ -410,13 +410,18 @@ async def cancel_booking(request: Request, body: CancelBookingRequest):
         # ดึง AdvisorId จาก booking เพื่อใช้ส่งการแจ้งเตือน
         advisor_id = booking.get("AdvisorId", "")
         logger.info(f" AdvisorId: {advisor_id}")
-        # แจ้งเตือนยกเลิกการจองของนักศึกษาส่งให้กับ อาจารย์
-        notify_chatbot(f"{chatbot_uri}/NotifyCancelled/CancelBookingAdvisor", {
-            "AdvisorId"   : advisor_id,
-            "StudentName" : booking.get("StudentName", ""),
-            "Date"        : date,
-            "Time"        : time_str
-        }, CHATBOT_INTERNAL_HEADERS)
+        # แจ้งเตือนยกเลิกการจองของนักศึกษาส่งให้กับ อาจารย์ (background — ไม่บล็อก event loop)
+        background_tasks.add_task(
+            notify_chatbot,
+            f"{chatbot_uri}/NotifyCancelled/CancelBookingAdvisor",
+            {
+                "AdvisorId"   : advisor_id,
+                "StudentName" : booking.get("StudentName", ""),
+                "Date"        : date,
+                "Time"        : time_str
+            },
+            CHATBOT_INTERNAL_HEADERS,
+        )
 
         return {"message": "ยกเลิกการจองสำเร็จ"}
 

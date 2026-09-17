@@ -1,7 +1,7 @@
 import logging
 
 logger = logging.getLogger(__name__)
-from fastapi import APIRouter, HTTPException, Request, Form, Depends
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Request, Form, Depends
 from ...Database.ConnectDB import Connect_MongoDB
 from ...auth.authUser import verify_user_token, get_user_id
 from datetime import datetime, timezone, timedelta
@@ -175,7 +175,7 @@ async def get_available_slots(request: Request):
 
 # API เลื่อนคิวการจองของนักศึกษา
 @router.put("/RescheduleBooking")
-async def reschedule_booking(request: Request, data: RescheduleForm = Depends()):
+async def reschedule_booking(request: Request, background_tasks: BackgroundTasks, data: RescheduleForm = Depends()):
     try:
         payload = verify_user_token(request)
         user_id = get_user_id(payload)
@@ -287,15 +287,20 @@ async def reschedule_booking(request: Request, data: RescheduleForm = Depends())
             "updatedAt"        : now,
         })
 
-        # ส่งการแจ้งเตือนไปให้ advisor นักศึกษาเลื่อนคิว
+        # ส่งการแจ้งเตือนไปให้ advisor นักศึกษาเลื่อนคิว (background — ไม่บล็อก event loop)
         advisor_id = booking.get("AdvisorId", "")
-        notify_chatbot(f"{chatbot_uri}/NotifyQueueAdivsor/RecheduleAdvisor", {
-            "AdvisorId"  : advisor_id,  # userId ของ Advisor
-            "StudentName": booking.get("StudentName", ""),
-            "Date"       : data.new_date,
-            "Time"       : f"{data.new_start}-{data.new_end}",
-            "Status"     : "Rescheduled"
-        }, CHATBOT_INTERNAL_HEADERS)
+        background_tasks.add_task(
+            notify_chatbot,
+            f"{chatbot_uri}/NotifyQueueAdivsor/RecheduleAdvisor",
+            {
+                "AdvisorId"  : advisor_id,  # userId ของ Advisor
+                "StudentName": booking.get("StudentName", ""),
+                "Date"       : data.new_date,
+                "Time"       : f"{data.new_start}-{data.new_end}",
+                "Status"     : "Rescheduled"
+            },
+            CHATBOT_INTERNAL_HEADERS,
+        )
             
         log_queue_management_history(
             db,

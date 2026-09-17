@@ -18,6 +18,7 @@ from common.slot_service import (
     CUTOFF_HOURS,
     SLOT_BLOCKING_STATUSES,
 )
+from common.notify import notify_chatbot
 
 router = APIRouter()
 
@@ -241,6 +242,16 @@ def _process_booking_status(db, col, booking, now_utc, now_utc7, tz_utc7):
                 now_utc,
             )
             recalculate_slot_booked(db, advisor_id, date_str, start, end)
+            # แจ้งเตือนนักศึกษาว่าคิวถูกระบบยกเลิกอัตโนมัติ (เดิมไม่มีการแจ้งเตือนเลย
+            # ทำให้นักศึกษาไม่รู้ว่าคิวถูกยกเลิกจนกว่าจะเปิดแอปเอง)
+            notify_chatbot(f"{chatbot_uri}/NotifyQueueStudent/NotifyStudent", {
+                "userId"      : booking.get("UserId", ""),
+                "StudentName" : booking.get("StudentName", ""),
+                "AdvisorName" : booking.get("Advisor_Name", ""),
+                "Date"        : date_str,
+                "Time"        : time_str,
+                "Status"      : "Cancelled",
+            }, CHATBOT_INTERNAL_HEADERS)
         return
 
     # ─── Approved + ถึงเวลาเริ่ม → InProgress ───────────────────────────────

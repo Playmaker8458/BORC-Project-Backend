@@ -1,7 +1,7 @@
 import logging
 
 logger = logging.getLogger(__name__)
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from ...Database.ConnectDB import Connect_MongoDB
 from ...auth.authUser import verify_user_token, get_user_id
 from datetime import datetime, timezone,timedelta
@@ -90,7 +90,7 @@ async def get_advisor_queues(request: Request):
 
 
 @router.put("/ConfirmQueue")
-async def confirm_queue(request: Request, body: ConfirmBody):
+async def confirm_queue(request: Request, body: ConfirmBody, background_tasks: BackgroundTasks):
     try:
         payload = verify_user_token(request)
         advisor_id = get_user_id(payload)
@@ -124,15 +124,20 @@ async def confirm_queue(request: Request, body: ConfirmBody):
         )
 
 
-        # ✅ แจ้งเตือนนักศึกษา สีเขียว
-        notify_chatbot(f"{chatbot_uri}/NotifyQueueStudent/NotifyStudent", {
-            "userId"      : booking.get("UserId", ""),
-            "StudentName" : booking.get("StudentName", ""),
-            "AdvisorName" : booking.get("Advisor_Name", ""),
-            "Date"        : booking.get("Date", ""),
-            "Time"        : booking.get("Time", ""),
-            "Status"      : "Approved"
-        }, CHATBOT_INTERNAL_HEADERS)
+        # ✅ แจ้งเตือนนักศึกษา สีเขียว (background — ไม่บล็อก event loop)
+        background_tasks.add_task(
+            notify_chatbot,
+            f"{chatbot_uri}/NotifyQueueStudent/NotifyStudent",
+            {
+                "userId"      : booking.get("UserId", ""),
+                "StudentName" : booking.get("StudentName", ""),
+                "AdvisorName" : booking.get("Advisor_Name", ""),
+                "Date"        : booking.get("Date", ""),
+                "Time"        : booking.get("Time", ""),
+                "Status"      : "Approved"
+            },
+            CHATBOT_INTERNAL_HEADERS,
+        )
             
         db["ApprovedHistory"].insert_one({
             "UserId"      : booking["UserId"],
@@ -169,7 +174,7 @@ async def confirm_queue(request: Request, body: ConfirmBody):
 
 
 @router.delete("/AdvisorCancelQueue")
-async def advisor_cancel_queue(request: Request, body: CancelBody):
+async def advisor_cancel_queue(request: Request, body: CancelBody, background_tasks: BackgroundTasks):
     try:
         payload = verify_user_token(request)
         advisor_id = get_user_id(payload)
@@ -245,15 +250,20 @@ async def advisor_cancel_queue(request: Request, body: CancelBody):
         if booking.get("AdvisorId") and date_str and start and end:
             sync_slot_booking(db, booking["AdvisorId"], date_str, start, end)
 
-              # ✅ แจ้งเตือนนักศึกษา สีแดง
-        notify_chatbot(f"{chatbot_uri}/NotifyQueueStudent/NotifyStudent", {
-            "userId"      : booking.get("UserId", ""),
-            "StudentName" : booking.get("StudentName", ""),
-            "AdvisorName" : advisor_name,
-            "Date"        : date_str,
-            "Time"        : time_str,
-            "Status"      : "Cancelled"
-        }, CHATBOT_INTERNAL_HEADERS)
+        # ✅ แจ้งเตือนนักศึกษา สีแดง (background — ไม่บล็อก event loop)
+        background_tasks.add_task(
+            notify_chatbot,
+            f"{chatbot_uri}/NotifyQueueStudent/NotifyStudent",
+            {
+                "userId"      : booking.get("UserId", ""),
+                "StudentName" : booking.get("StudentName", ""),
+                "AdvisorName" : advisor_name,
+                "Date"        : date_str,
+                "Time"        : time_str,
+                "Status"      : "Cancelled"
+            },
+            CHATBOT_INTERNAL_HEADERS,
+        )
 
         return {"message": "ยกเลิกคิวสำเร็จ นักศึกษาสามารถจองคิวใหม่ได้"}
 

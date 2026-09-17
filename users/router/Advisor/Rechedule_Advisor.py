@@ -1,7 +1,7 @@
 import logging
 
 logger = logging.getLogger(__name__)
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from ...Database.ConnectDB import Connect_MongoDB
 from users.auth.authUser import verify_user_token, get_user_id
 from datetime import datetime, timezone, timedelta
@@ -179,7 +179,7 @@ async def get_available_slots(user_id: str, request: Request):
 
 # ─── PUT /advisor-reschedule/RescheduleBooking ────────────────────────────────
 @router.put("/RescheduleBooking")
-async def reschedule_booking(request: Request, body: RescheduleBody):
+async def reschedule_booking(request: Request, body: RescheduleBody, background_tasks: BackgroundTasks):
     try:
         payload    = verify_user_token(request)
         advisor_id = get_user_id(payload)
@@ -287,15 +287,20 @@ async def reschedule_booking(request: Request, body: RescheduleBody):
             "updatedAt"        : now,
         })
         
-    # ส่งการแจ้งเตือนไปให้ user
+    # ส่งการแจ้งเตือนไปให้ user (background — ไม่บล็อก event loop)
         user_id_student = booking.get("UserId", "")
-        notify_chatbot(f"{chatbot_uri}/NotifyQueueStudent/RecheduleStudent", {
-            "UserId"     : user_id_student,
-            "StudentName": booking.get("StudentName", ""),
-            "Date"       : body.new_date,
-            "Time"       : f"{body.new_start}-{body.new_end}",
-            "Status"     : "Rescheduled"
-        }, CHATBOT_INTERNAL_HEADERS)
+        background_tasks.add_task(
+            notify_chatbot,
+            f"{chatbot_uri}/NotifyQueueStudent/RecheduleStudent",
+            {
+                "UserId"     : user_id_student,
+                "StudentName": booking.get("StudentName", ""),
+                "Date"       : body.new_date,
+                "Time"       : f"{body.new_start}-{body.new_end}",
+                "Status"     : "Rescheduled"
+            },
+            CHATBOT_INTERNAL_HEADERS,
+        )
 
 
         log_queue_management_history(
