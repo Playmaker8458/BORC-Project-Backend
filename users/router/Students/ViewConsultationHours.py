@@ -3,7 +3,6 @@ import logging
 from fastapi import APIRouter, HTTPException, Request
 from ...Database.ConnectDB import Connect_MongoDB
 from users.auth.authUser import verify_user_token
-from datetime import datetime, timezone, timedelta
 
 from common.slot_service import get_today_str
 

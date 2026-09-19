@@ -3,12 +3,12 @@ import logging
 logger = logging.getLogger(__name__)
 import re
 import calendar
+from itertools import combinations
 from typing import List, Dict
-from fastapi import APIRouter, HTTPException, Request, Depends
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, field_validator
 from ...Database.ConnectDB import Connect_MongoDB
-from ...auth.authUser import get_current_advisor, verify_user_token
-import re
+from ...auth.authUser import get_current_advisor
 from datetime import datetime, timezone, timedelta, date as date_type
 
 from common.slot_service import get_today_str
@@ -78,37 +78,33 @@ def get_today_utc7() -> date_type:
     return (datetime.now(timezone.utc) + timedelta(hours=7)).date()
 
 
-def validate_date_format_read(date: str) -> None:
-    """ตรวจรูปแบบวันที่เท่านั้น — ใช้กับ GET"""
-    if not re.match(r"^\d{4}-\d{2}-\d{2}$", date):
+_DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _parse_date_or_400(date: str) -> date_type:
+    """ตรวจรูปแบบ YYYY-MM-DD และว่าเป็นวันที่มีอยู่จริง คืนค่า date หรือ raise 400"""
+    if not _DATE_PATTERN.match(date):
         raise HTTPException(status_code=400, detail="รูปแบบวันที่ไม่ถูกต้อง (YYYY-MM-DD)")
     try:
-        datetime.strptime(date, "%Y-%m-%d")
+        return datetime.strptime(date, "%Y-%m-%d").date()
     except ValueError:
         raise HTTPException(status_code=400, detail="วันที่ไม่ถูกต้อง")
+
+
+def validate_date_format_read(date: str) -> None:
+    """ตรวจรูปแบบวันที่เท่านั้น — ใช้กับ GET"""
+    _parse_date_or_400(date)
 
 
 def validate_date_format_write(date: str) -> None:
-    """ตรวจรูปแบบ + บังคับต้องเป็นวันพรุ่งนี้เป็นต้นไป — ใช้กับ POST (สร้างใหม่) เท่านั้น"""
-    if not re.match(r"^\d{4}-\d{2}-\d{2}$", date):
-        raise HTTPException(status_code=400, detail="รูปแบบวันที่ไม่ถูกต้อง (YYYY-MM-DD)")
-    try:
-        dt = datetime.strptime(date, "%Y-%m-%d").date()
-    except ValueError:
-        raise HTTPException(status_code=400, detail="วันที่ไม่ถูกต้อง")
-    
-    # เทสจัดการวันที่ทำวันนี้ได้วันนี้
-    today = get_today_utc7()
-    # if dt <= today:
-    #     tomorrow = today + timedelta(days=1)
-    #     raise HTTPException(
-    #         status_code=400,
-    #         detail=f"ไม่สามารถกำหนดช่วงเวลาของวันนี้หรือวันที่ผ่านมาได้ (ต้องเป็นวันที่ {tomorrow} เป็นต้นไป)"
-    #     )
-    if dt < today:  
+    """ตรวจรูปแบบ + ห้ามวันที่ผ่านมาแล้ว — ใช้กับ POST (สร้างใหม่) เท่านั้น
+
+    วันนี้ยังกำหนดได้ (เพื่อให้ทดสอบระบบด้วยวันเดียวกันได้) ห้ามเฉพาะวันก่อนหน้า
+    """
+    if _parse_date_or_400(date) < get_today_utc7():
         raise HTTPException(
             status_code=400,
-            detail=f"ไม่สามารถกำหนดช่วงเวลาวันที่ผ่านมาได้"
+            detail="ไม่สามารถกำหนดช่วงเวลาวันที่ผ่านมาได้"
         )
 
 
@@ -118,12 +114,7 @@ def validate_date_format_delete_update(date: str) -> None:
     ใช้กับ DELETE / UPDATE เพราะ slot เดิมอาจถูกสร้างไว้ก่อนหน้า
     และยังต้องแก้ไข/ลบได้แม้วันนั้นจะผ่านไปแล้ว
     """
-    if not re.match(r"^\d{4}-\d{2}-\d{2}$", date):
-        raise HTTPException(status_code=400, detail="รูปแบบวันที่ไม่ถูกต้อง (YYYY-MM-DD)")
-    try:
-        datetime.strptime(date, "%Y-%m-%d")
-    except ValueError:
-        raise HTTPException(status_code=400, detail="วันที่ไม่ถูกต้อง")
+    _parse_date_or_400(date)
 
 
 def validate_month_format(month: str) -> None:
@@ -131,26 +122,29 @@ def validate_month_format(month: str) -> None:
         raise HTTPException(status_code=400, detail="รูปแบบเดือนไม่ถูกต้อง (YYYY-MM)")
 
 
+def _to_minutes(slot) -> tuple[int, int] | None:
+    """(เวลาเริ่ม, เวลาจบ) เป็นนาทีนับจาก 00:00; None ถ้าข้อมูลผิดรูปแบบ (ให้ข้ามช่วงนั้น)"""
+    try:
+        start = slot["start"] if isinstance(slot, dict) else slot.start
+        end   = slot["end"]   if isinstance(slot, dict) else slot.end
+        sh, sm = map(int, start.split(":"))
+        eh, em = map(int, end.split(":"))
+        return sh * 60 + sm, eh * 60 + em
+    except (KeyError, AttributeError, ValueError):
+        return None
+
+
+def _conflicts(a: tuple[int, int], b: tuple[int, int]) -> bool:
+    """สองช่วงเวลาชนกัน: ทับกันจริง หรือ "ติดกัน" (จบเท่ากับเวลาเริ่มของอีกช่วง นับเป็นทับด้วย)"""
+    (s1, e1), (s2, e2) = a, b
+    return (s1 < e2 and s2 < e1) or e1 == s2 or e2 == s1
+
+
 def check_overlap(slots: list) -> bool:
-    times = []
-    for s in slots:
-        try:
-            start = s["start"] if isinstance(s, dict) else s.start
-            end   = s["end"]   if isinstance(s, dict) else s.end
-            sh, sm = map(int, start.split(":"))
-            eh, em = map(int, end.split(":"))
-            times.append((sh * 60 + sm, eh * 60 + em))
-        except (KeyError, AttributeError, ValueError):
-            continue
-    for i in range(len(times)):
-        for j in range(i + 1, len(times)):
-            s1, e1 = times[i]
-            s2, e2 = times[j]
-            if s1 < e2 and s2 < e1:
-                return True
-            if e1 == s2 or e2 == s1:
-                return True
-    return False
+    """True ถ้ามีช่วงเวลาอย่างน้อยสองช่วงชนกัน (เทียบทุกคู่ตามเดิม เพื่อคงผลกับช่วงที่เวลาจบก่อนเวลาเริ่ม
+    ซึ่ง TimeSlot ยังไม่ได้ห้ามไว้) จำนวน slot ต่อวันน้อย ต้นทุนการเทียบทุกคู่จึงเล็กน้อย"""
+    times = [t for t in map(_to_minutes, slots) if t is not None]
+    return any(_conflicts(a, b) for a, b in combinations(times, 2))
 
 
 def compute_is_locked(booked: int, current_locked: bool) -> bool:

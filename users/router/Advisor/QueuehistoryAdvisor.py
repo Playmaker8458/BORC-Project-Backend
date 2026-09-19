@@ -4,7 +4,6 @@ logger = logging.getLogger(__name__)
 from fastapi import APIRouter, HTTPException, Request
 from ...Database.ConnectDB import Connect_MongoDB
 from users.auth.authUser import get_current_advisor
-from datetime import datetime, timezone, timedelta
 
 router = APIRouter()
 

@@ -6,20 +6,10 @@ from ...Database.ConnectDB import Connect_MongoDB
 from users.auth.authUser import verify_user_token, get_user_id
 from datetime import datetime, timezone, timedelta
 from pymongo import ASCENDING, DESCENDING
-from bson import ObjectId
-import httpx
 import requests as req
 from dotenv import load_dotenv
-import os
 from pymongo.errors import DuplicateKeyError
-from common.slot_service import (
-    get_now_utc7,
-    get_tomorrow_str,
-    is_within_cutoff,
-    recalculate_slot_booked,
-    CUTOFF_HOURS,
-    SLOT_BLOCKING_STATUSES,
-)
+from common.slot_service import get_now_utc7, is_within_cutoff, recalculate_slot_booked, CUTOFF_HOURS
 from common.notify import CHATBOT_INTERNAL_HEADERS, CHATBOT_URL, notify_chatbot
 
 router = APIRouter()
@@ -292,69 +282,95 @@ def _process_booking_status(db, col, booking, now_utc, now_utc7, tz_utc7):
 
 
 
+# ─── กฎ "slot จองได้หรือไม่" (ใช้ร่วมกันโดย AvailableAdvisors / AvailableSlots) ───────────
+def _slot_is_taken(slot: dict) -> bool:
+    """slot ถูกล็อก ปิด หรือเต็มแล้ว (จองไม่ได้)"""
+    return (
+        slot.get("isLocked", False)
+        or slot.get("is_closed", False)
+        or slot.get("booked", 0) >= slot.get("max_booking", 1)
+    )
+
+
+def _cutoff_datetime(date: str, start: str) -> datetime | None:
+    """เวลาปิดรับจอง = เวลาเริ่ม - CUTOFF_HOURS (UTC+7); None ถ้าเวลาเริ่มผิดรูปแบบ"""
+    try:
+        start_dt = datetime.strptime(f"{date} {start}", "%Y-%m-%d %H:%M").replace(tzinfo=timezone(timedelta(hours=7)))
+    except ValueError:
+        return None
+    return start_dt - timedelta(hours=CUTOFF_HOURS)
+
+
+def _has_bookable_slot(slots: list, date: str, today: str, now: datetime) -> bool:
+    """มี slot ที่จองได้อย่างน้อย 1 ช่วง — ถ้าเป็นวันนี้ ต้องยังไม่เลยเวลา cutoff
+
+    (เวลาเริ่มที่ผิดรูปแบบของวันนี้ ไม่ถูกนับว่าว่าง: พฤติกรรมเดิมของรายชื่ออาจารย์)
+    """
+    for s in slots:
+        if _slot_is_taken(s):
+            continue
+        if date != today:
+            return True
+        cutoff = _cutoff_datetime(date, s["start"])
+        if cutoff is not None and now < cutoff:
+            return True
+    return False
+
+
+def _slot_view(s: dict, date: str, today: str, now: datetime) -> dict:
+    """รูปแบบ slot ที่ส่งให้หน้าจอง พร้อมสถานะปิด/เต็ม/เลยเวลา
+
+    (เวลาเริ่มที่ผิดรูปแบบของวันนี้ ถือว่ายังไม่เลยเวลา: พฤติกรรมเดิมของหน้าเลือกเวลา)
+    """
+    is_past = False
+    if date == today:
+        cutoff = _cutoff_datetime(date, s["start"])
+        is_past = cutoff is not None and now >= cutoff
+    return {
+        "start"    : s["start"],
+        "end"      : s["end"],
+        "label"    : s.get("label", ""),
+        "is_closed": _slot_is_taken(s) or is_past,
+        "is_past"  : is_past,
+        "is_booked": s.get("isLocked", False) or s.get("booked", 0) >= s.get("max_booking", 1),
+    }
+
+
 # ─── GET /AvailableAdvisors ───────────────────────────────────────────────────
 @router.get("/AvailableAdvisors")
 def get_available_advisors(request: Request):
-    """ดึงรายชื่ออาจารย์ที่มี slot ว่างตั้งแต่วันพรุ่งนี้เป็นต้นไป"""
+    """ดึงรายชื่ออาจารย์ที่มี slot ว่างตั้งแต่วันนี้เป็นต้นไป"""
     try:
         verify_user_token(request)
         db       = get_db()
-        min_date = get_tomorrow_str()
+        now_utc7 = get_now_utc7()
+        today    = now_utc7.strftime("%Y-%m-%d")
 
-        # min_date = (get_now_utc7() + timedelta(days=1)).strftime("%Y-%m-%d")
-        min_date = get_now_utc7().strftime("%Y-%m-%d")
         all_docs = list(db["ManageTimeSlots"].find(
             {},
             {"_id": 0, "advisor_name": 1, "advisorId": 1, "dates": 1}
         ))
 
-        now_utc7 = get_now_utc7()
-        advisor_map: dict = {}
+        advisors: dict = {}
         for doc in all_docs:
             advisor_id = doc.get("advisorId", "")
             name       = doc.get("advisor_name", "")
             if not advisor_id or not name:
                 continue
 
-            if advisor_id not in advisor_map:
-                advisor_map[advisor_id] = {"name": name, "has_available": False}
+            entry = advisors.setdefault(advisor_id, {"name": name, "has_available": False})
+            if entry["has_available"]:
+                continue
+            entry["has_available"] = any(
+                isinstance(slots, list) and date >= today and _has_bookable_slot(slots, date, today, now_utc7)
+                for date, slots in doc.get("dates", {}).items()
+            )
 
-            for date, slots in doc.get("dates", {}).items():
-                if not isinstance(slots, list) or date < min_date:
-                    continue
-                
-                has_valid_slot = False
-                for s in slots:
-                    if (
-                        s.get("isLocked", False)
-                        or s.get("is_closed", False)
-                        or s.get("booked", 0) >= s.get("max_booking", 1)
-                    ):
-                        continue
-                    
-                    if date == min_date:
-                        try:
-                            start_dt = datetime.strptime(f"{date} {s['start']}", "%Y-%m-%d %H:%M").replace(tzinfo=timezone(timedelta(hours=7)))
-                            cutoff_dt = start_dt - timedelta(hours=CUTOFF_HOURS)
-                            if now_utc7 < cutoff_dt:
-                                has_valid_slot = True
-                                break
-                        except ValueError:
-                            pass
-                    else:
-                        has_valid_slot = True
-                        break
-                        
-                if has_valid_slot:
-                    advisor_map[advisor_id]["has_available"] = True
-                    break
-
-        result = [
+        return {"advisors": [
             {"advisor_id": aid, "advisor_name": info["name"]}
-            for aid, info in advisor_map.items()
+            for aid, info in advisors.items()
             if info["has_available"]
-        ]
-        return {"advisors": result}
+        ]}
 
     except HTTPException:
         raise
@@ -370,9 +386,8 @@ def get_available_slots(advisor_id: str, request: Request):
     try:
         verify_user_token(request)
         db       = get_db()
-
-        # min_date = (get_now_utc7() + timedelta(days=1)).strftime("%Y-%m-%d")
-        min_date = get_now_utc7().strftime("%Y-%m-%d")
+        now_utc7 = get_now_utc7()
+        today    = now_utc7.strftime("%Y-%m-%d")
 
         docs = list(db["ManageTimeSlots"].find(
             {"advisorId": advisor_id},
@@ -382,40 +397,11 @@ def get_available_slots(advisor_id: str, request: Request):
             return {"dates": {}}
 
         merged_dates = {}
-
-        now_utc7 = get_now_utc7()
-
         for doc in docs:
             for date, slots in doc.get("dates", {}).items():
-                if not isinstance(slots, list) or date < min_date:
+                if not isinstance(slots, list) or date < today:
                     continue
-                
-                merged_slots = []
-                for s in slots:
-                    is_past = False
-                    if date == min_date:
-                        try:
-                            start_dt = datetime.strptime(f"{date} {s['start']}", "%Y-%m-%d %H:%M").replace(tzinfo=timezone(timedelta(hours=7)))
-                            cutoff_dt = start_dt - timedelta(hours=CUTOFF_HOURS)
-                            if now_utc7 >= cutoff_dt:
-                                is_past = True
-                        except ValueError:
-                            pass
-
-                    merged_slots.append({
-                        "start"    : s["start"],
-                        "end"      : s["end"],
-                        "label"    : s.get("label", ""),
-                        "is_closed": (
-                            s.get("isLocked", False)
-                            or s.get("is_closed", False)
-                            or s.get("booked", 0) >= s.get("max_booking", 1)
-                            or is_past
-                        ),
-                        "is_past"  : is_past,
-                        "is_booked": s.get("isLocked", False) or s.get("booked", 0) >= s.get("max_booking", 1),
-                    })
-                merged_dates[date] = merged_slots
+                merged_dates[date] = [_slot_view(s, date, today, now_utc7) for s in slots]
 
         return {"advisor_id": advisor_id, "dates": merged_dates}
 

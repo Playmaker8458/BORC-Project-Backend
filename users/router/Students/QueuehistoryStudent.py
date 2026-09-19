@@ -5,7 +5,7 @@ from fastapi import APIRouter, HTTPException, Request
 from ...Database.ConnectDB import Connect_MongoDB
 from users.auth.authUser import get_current_student
 from common.parallel import run_parallel
-from datetime import datetime, timezone, timedelta
+from datetime import datetime
 
 router = APIRouter()
 

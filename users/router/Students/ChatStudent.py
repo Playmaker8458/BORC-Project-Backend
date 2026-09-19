@@ -8,6 +8,7 @@ from fastapi.exceptions import WebSocketException
 from starlette import status as ws_status
 
 from users.auth.authUser import ensure_user_role, verify_user_token, get_user_id
+from common.chat_limits import ChatInvalid, chat_rate_ok, parse_ws_text, WS_POLICY_VIOLATION
 # ⚠️ ปรับ path import ให้ตรงกับตำแหน่งไฟล์ advisor_chat.py จริงในโปรเจกต์
 from ..Advisor.testChatAdvisor import db, ACTIVE_STATUSES, room_connect, room_disconnect, room_broadcast, get_current_user_ws
 
@@ -104,15 +105,28 @@ async def student_chat_ws(
 
     try:
         while True:
-            data = await websocket.receive_json()
+            raw = await websocket.receive_text()
+            try:
+                text = parse_ws_text(raw)
+            except ChatInvalid as exc:
+                # ข้อความใหญ่เกิน/รูปแบบผิด: ปิดการเชื่อมต่อ (หน้าเว็บจำกัดความยาวไว้แล้ว จึงเกิดจากผู้ใช้ที่ผิดปกติเท่านั้น)
+                room_disconnect(student_id, websocket)
+                await websocket.close(code=exc.code)
+                return
+            if text is None:
+                continue
+            if not chat_rate_ok(student_id):
+                room_disconnect(student_id, websocket)
+                await websocket.close(code=WS_POLICY_VIOLATION)
+                return
             now = datetime.now(timezone.utc)
 
             await db["ChatMessages"].insert_one({
                 "student_id": student_id, "advisor_id": advisor_id,
-                "sender": "student", "type": "text", "text": data.get("text", ""), "timestamp": now,
+                "sender": "student", "type": "text", "text": text, "timestamp": now,
             })
             await room_broadcast(student_id, {
-                "sender": "student", "type": "text", "text": data.get("text", ""),
+                "sender": "student", "type": "text", "text": text,
                 "timestamp": now.isoformat().replace("+00:00", "Z"),
             })
     except WebSocketDisconnect:

@@ -2,7 +2,6 @@ import logging
 
 logger = logging.getLogger(__name__)
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
 from Admin.Database.ConnectDB import Connect_MongoDB
 
 router = APIRouter()

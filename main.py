@@ -3,6 +3,8 @@ import logging
 from contextlib import asynccontextmanager, suppress
 from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from common.origin_guard import OriginGuardMiddleware
+from common.security_headers import SecurityHeadersMiddleware, docs_kwargs
 from dotenv import load_dotenv
 import os
 
@@ -78,7 +80,9 @@ async def lifespan(app: FastAPI):
         await chat_mongo_client.close()
 
 
-app = FastAPI(lifespan=lifespan)
+# ปิด /docs /redoc /openapi.json บน production (เปิดกลับด้วย env ENABLE_DOCS=true เมื่อต้องดีบัก)
+_DOCS = docs_kwargs(is_prod=os.getenv("ENV") == "production", enable_docs=os.getenv("ENABLE_DOCS"))
+app = FastAPI(lifespan=lifespan, **_DOCS)
 
 # ── Rate limiting (slowapi) ────────────────────────────────────────────────
 # ใช้ limiter ตัวเดียวกับที่ authAdmin.py / authUser.py ใช้ (common/rate_limit.py)
@@ -142,12 +146,27 @@ if not IS_PROD:
     ]
 
 
+# ตรวจ Origin ของคำขอที่เปลี่ยนข้อมูลและ WebSocket (กัน CSRF / Cross-site WebSocket Hijacking
+# เพราะ cookie เป็น SameSite=None) ใช้รายชื่อเดียวกับ CORS
+# ต้อง add ก่อน CORSMiddleware: CORS ต้องอยู่ชั้นนอกสุดเพื่อตอบ preflight เอง
+# สวิตช์ฉุกเฉินผ่าน env ORIGIN_CHECK=enforce|log|off (ดู common/origin_guard.py)
+app.add_middleware(OriginGuardMiddleware, allowed_origins=origins)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+)
+
+# security headers ให้ทุก response (add ทีหลัง CORS = ชั้นนอกสุด จึงครอบคลุม preflight/403/429 ด้วย)
+# CSP "default-src 'none'" เหมาะกับ API ที่ตอบ JSON เท่านั้น: ถ้าเปิด /docs ไว้ (Swagger โหลด script/style
+# จาก CDN) จะไม่ตั้ง CSP เพื่อไม่ให้หน้า docs พัง
+app.add_middleware(
+    SecurityHeadersMiddleware,
+    hsts=IS_PROD,
+    csp=None if not _DOCS else "default-src 'none'; frame-ancestors 'none'",
 )
 
 

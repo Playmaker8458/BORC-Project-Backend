@@ -53,3 +53,14 @@ def _reset_user_cache():
     authUser.invalidate_user_cache()
     yield
     authUser.invalidate_user_cache()
+
+
+@pytest.fixture(autouse=True)
+def _reset_chat_limiter():
+    """ตัวนับความถี่ของแชทเป็น state ระดับ process (ข้ามคำขอ) — ล้างก่อน/หลังทุกเทส
+    ไม่ให้ผู้ใช้ชื่อเดียวกันจากเทสก่อนหน้าทำให้เทสถัดไปโดน 429/ปิด WebSocket แบบสุ่มตามลำดับรัน"""
+    from common.chat_limits import chat_limiter
+
+    chat_limiter.reset()
+    yield
+    chat_limiter.reset()

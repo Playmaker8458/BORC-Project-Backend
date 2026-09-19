@@ -7,7 +7,9 @@ from pydantic import BaseModel
 from Admin.Database.ConnectDB import Connect_MongoDB
 from datetime import datetime, timezone
 from bson import ObjectId
-from Admin.auth.authAdmin import verify_token   # ✅ import verify จาก authAdmin
+from Admin.auth.authAdmin import verify_token, create_access_token   # ✅ import verify จาก authAdmin
+
+MIN_PASSWORD_LENGTH = 12
 
 router = APIRouter()
 
@@ -39,7 +41,9 @@ def update_AdminPasswordDB(user_id: str, hashed_password: str) -> bool:
             {
                 "$set": {
                     "Password"  : hashed_password,
-                    "updatedAt" : datetime.now(timezone.utc)
+                    "updatedAt" : datetime.now(timezone.utc),
+                    # verify_token ใช้เวลานี้เพิกถอน token ที่ออกก่อนการเปลี่ยนรหัสผ่าน
+                    "passwordChangedAt": datetime.now(timezone.utc),
                 }
             }
         )
@@ -64,10 +68,16 @@ def change_password(
         )
 
     # ตรวจสอบความยาวรหัสผ่านใหม่
-    if len(data.new_password) < 8:
+    if len(data.new_password) < MIN_PASSWORD_LENGTH:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="รหัสผ่านต้องมีอย่างน้อย 8 ตัวอักษร"
+            detail=f"รหัสผ่านต้องมีอย่างน้อย {MIN_PASSWORD_LENGTH} ตัวอักษร"
+        )
+
+    if data.new_password == data.current_password:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="รหัสผ่านใหม่ต้องไม่ซ้ำกับรหัสผ่านเดิม"
         )
 
     # ดึงรหัสผ่านปัจจุบันจาก DB
@@ -96,4 +106,11 @@ def change_password(
     if not updated:
         raise HTTPException(status_code=404, detail="ไม่พบข้อมูลผู้ดูแลระบบ")
 
-    return {"message": "เปลี่ยนรหัสผ่านสำเร็จ"}
+    # token เดิมของผู้เรียกถูกเพิกถอนแล้ว (ออกก่อนเปลี่ยนรหัสผ่าน) จึงออก token ใหม่ให้ใช้งานต่อได้เลย
+    fresh_token = create_access_token({
+        "sub"     : payload["email"],
+        "user_id" : payload["user_id"],
+        "role"    : "Admin",
+        "FullName": payload["FullName"],
+    })
+    return {"message": "เปลี่ยนรหัสผ่านสำเร็จ", "access_token": fresh_token}

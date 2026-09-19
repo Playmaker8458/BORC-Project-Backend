@@ -1,6 +1,5 @@
 import logging
-import os
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 
 from dotenv import load_dotenv
 
@@ -38,8 +37,24 @@ def create_access_token(data: dict):
     """
     รับข้อมูล user แล้วสร้าง token พร้อมวันหมดอายุ
     (ใช้ common.jwt_utils.encode_token ร่วมกับฝั่ง users/auth/authUser.py)
+
+    ใส่ iat (เวลาออก token แบบทศนิยมวินาที กันช่องว่างเมื่อเปลี่ยนรหัสผ่านในวินาทีเดียวกับที่ล็อกอิน) ด้วย เพื่อให้ verify_token ตรวจได้ว่า token ออกก่อน
+    การเปลี่ยนรหัสผ่านล่าสุดหรือไม่ (ถ้าใช่ = ถูกเพิกถอน)
     """
-    return encode_token(data, timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES))
+    return encode_token({**data, "iat": datetime.now(timezone.utc).timestamp()},
+                        timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES))
+
+
+# hash ปลอมไว้เทียบรหัสผ่านตอนไม่พบอีเมล: ให้เวลาตอบเท่ากับกรณีมีอีเมล (กันเดาอีเมลจากเวลาตอบ)
+_DUMMY_HASH = bcrypt.hashpw(b"not-a-real-password", bcrypt.gensalt()).decode("utf-8")
+INVALID_CREDENTIALS_DETAIL = "อีเมลหรือรหัสผ่านไม่ถูกต้อง"
+
+
+def _to_epoch(value: datetime) -> float:
+    """MongoDB คืน datetime แบบไม่มี timezone (UTC) ถ้าไม่ได้ตั้ง tz_aware"""
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.timestamp()
 
 
 # ตรวจสอบ Token ว่ามีหรือไม่
@@ -59,6 +74,17 @@ def verify_token(token: str = Depends(oauth2_scheme)):
         admin = getAdminByIdDB(user_id)
         if admin is None:
             raise HTTPException(status_code=401, detail="บัญชีผู้ใช้งานนี้ถูกลบหรือไม่มีอยู่ในระบบแล้ว")
+
+        # token ที่ออกก่อนการเปลี่ยนรหัสผ่านล่าสุดใช้ไม่ได้ (เพิกถอน session เก่าเมื่อรหัสผ่านเปลี่ยน)
+        # token ที่ไม่มี iat (ออกก่อนมีระบบนี้) ยังใช้ได้จนกว่าจะมีการเปลี่ยนรหัสผ่านครั้งแรก
+        changed_at = admin.get("passwordChangedAt")
+        if changed_at is not None:
+            issued_at = payload.get("iat")
+            if not isinstance(issued_at, (int, float)) or issued_at < _to_epoch(changed_at):
+                raise HTTPException(
+                    status_code=401,
+                    detail="Token หมดอายุเนื่องจากมีการเปลี่ยนรหัสผ่าน กรุณาเข้าสู่ระบบใหม่",
+                )
 
         return {"email": email, "user_id": user_id, "role": role, "FullName" : fullName}
 
@@ -99,29 +125,27 @@ def login(request: Request, data: LoginRequest):
 
     try:
         # ตรวจสอบข้อมูล Admin ในการเข้าสู่ระบบ
+        # ตอบข้อความเดียวกันทั้งกรณี "ไม่พบอีเมล" และ "รหัสผ่านผิด" (กันเดาอีเมลแอดมิน)
+        # และเทียบ bcrypt เสมอ แม้ไม่พบอีเมล เพื่อให้เวลาตอบไม่ต่างกัน
         admin = getAdminDB(data)
-        if admin:
-            hashed_password = admin["Password"]
+        hashed_password = admin["Password"] if admin else _DUMMY_HASH
 
-            if not bcrypt.checkpw(
-                data.password.encode("utf-8"),
-                hashed_password.encode("utf-8")
-            ):
-                raise HTTPException(status_code=401, detail="รหัสผ่านไม่ถูกต้องกรุณากรอกใหม่อีกครั้ง")
+        password_ok = bcrypt.checkpw(
+            data.password.encode("utf-8"),
+            hashed_password.encode("utf-8")
+        )
+        if not admin or not password_ok:
+            raise HTTPException(status_code=401, detail=INVALID_CREDENTIALS_DETAIL)
 
-            access_token = create_access_token({
-                "sub"     : admin["Email"],
-                "user_id" : str(admin["_id"]),
-                "role"    : "Admin",
-                "FullName": "ผู้ดูแลระบบ" 
-            })
+        access_token = create_access_token({
+            "sub"     : admin["Email"],
+            "user_id" : str(admin["_id"]),
+            "role"    : "Admin",
+            "FullName": "ผู้ดูแลระบบ"
+        })
 
-            return {"access_token": access_token}
+        return {"access_token": access_token}
 
-
-        # ถ้าไม่พบบัญชีผู้ใช้งานจะแสดงสถานะ 404 กลับไป
-        raise HTTPException(status_code=404, detail="ไม่พบบัญชีผู้ใช้งานในระบบ")
-    
     except HTTPException:
         raise
     except Exception as e:

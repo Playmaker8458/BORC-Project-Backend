@@ -262,6 +262,8 @@ def test_data_approved_requires_auth(chat_advisor_client):
 
 def test_send_chat_message_persists_and_broadcasts(chat_advisor_client, mongo_client):
     _seed_user(mongo_client, "advisor-1", "Advisor")
+    # ต้องมีคิวร่วมกัน (Step 3: อาจารย์ส่งข้อความถึงนักศึกษาที่ไม่มีคิวกับตนไม่ได้)
+    _insert_booking(mongo_client, UserId="student-1", AdvisorId="advisor-1", Status="Approved")
 
     resp = chat_advisor_client.post(
         "/chat/message",

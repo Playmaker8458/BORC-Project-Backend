@@ -2,7 +2,7 @@
 Regression tests สำหรับจุดที่แก้ไขจาก security/delivery audit:
 
 1. SetupProfile.py ต้องออก JWT ผ่าน common/jwt_utils (shared util) แทนการ
-   เรียก jose.jwt.encode ตรง ๆ — token ที่ได้ต้อง decode ได้ด้วย decode_token()
+   เรียก jwt.encode (PyJWT) ตรง ๆ — token ที่ได้ต้อง decode ได้ด้วย decode_token()
    เดียวกับที่ authUser.py ใช้ (พิสูจน์ว่าใช้ secret/algorithm ชุดเดียวกันจริง)
 2. Reschedule_Students.py / Rechedule_Advisor.py: bug เดิมเรียก `.json()` บน
    module `requests`/object คำขอ (ไม่ใช่ response ที่ได้จาก .post()) ทำให้

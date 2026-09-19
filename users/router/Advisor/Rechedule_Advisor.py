@@ -4,12 +4,11 @@ logger = logging.getLogger(__name__)
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from ...Database.ConnectDB import Connect_MongoDB
 from users.auth.authUser import verify_user_token, get_user_id
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from pydantic import BaseModel
 import requests as http_req  # ไม่ได้เรียกตรงนี้แล้ว (ใช้ common.notify แทน) แต่คงไว้เพราะ
                               # tests/test_security_fixes.py เข้าถึง module.http_req โดยตรง
 from dotenv import load_dotenv
-import os
 from common.slot_service import (
     ensure_slot_open_for_reschedule,
     get_reschedule_available_dates,

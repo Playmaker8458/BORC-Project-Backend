@@ -66,7 +66,8 @@ def test_admin_login_unknown_email(admin_client, mongo_client):
         json={"email": "nobody@example.com", "password": "whatever"},
     )
 
-    assert resp.status_code == 404
+    # ตอบ 401 เหมือนกรณีรหัสผ่านผิด (เดิมเป็น 404 ซึ่งทำให้เดาอีเมลแอดมินได้)
+    assert resp.status_code == 401
 
 
 def test_admin_login_missing_fields(admin_client):

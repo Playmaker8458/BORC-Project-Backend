@@ -6,9 +6,10 @@ from pydantic import BaseModel, field_validator
 from typing import Optional
 from users.Database.ConnectDB import Connect_MongoDB
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from common.jwt_utils import encode_token
 from common.rate_limit import limit
+from common.url_safety import UnsafeUrl, validate_https_url
 from users.auth.authUser import verify_pending_or_active_user, set_user_session, SESSION_MAX_AGE
 
 router = APIRouter()
@@ -24,6 +25,7 @@ FACULTIES: dict[str, list[str]] = {
 }
 
 _MAX_NAME_LEN = 100
+_MAX_IMAGE_URL_LEN = 500
 
 
 class DataProfile(BaseModel):
@@ -54,6 +56,21 @@ class DataProfile(BaseModel):
         if len(value) > _MAX_NAME_LEN:
             raise ValueError(f"ความยาวต้องไม่เกิน {_MAX_NAME_LEN} ตัวอักษร")
         return value
+
+    @field_validator("imageURL", mode="after")
+    @classmethod
+    def _image_url_must_be_safe(cls, value):
+        """รับเฉพาะ "line" (ใช้รูปจาก LINE), ค่าว่าง หรือ https URL ยาว ≤ 500 — ไม่เก็บ javascript:/data:/http:"""
+        if value is None:
+            return "line"
+        if value in ("", "line"):
+            return value
+        if len(value) > _MAX_IMAGE_URL_LEN:
+            raise ValueError(f"imageURL ยาวเกิน {_MAX_IMAGE_URL_LEN} ตัวอักษร")
+        try:
+            return validate_https_url(value)
+        except UnsafeUrl as exc:
+            raise ValueError(str(exc)) from None
 
     @field_validator("faculty", mode="after")
     @classmethod

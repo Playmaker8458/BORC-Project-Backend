@@ -14,7 +14,8 @@ import os
 from datetime import datetime, timedelta, timezone
 
 from dotenv import load_dotenv
-from jose import JWTError, jwt
+import jwt
+from jwt import PyJWTError as JWTError
 
 load_dotenv()
 
@@ -52,9 +53,12 @@ def decode_token(token: str) -> dict:
     """ถอดรหัส JWT token คืนค่า payload dict
 
     Raises:
-        JWTError: ถ้า token ไม่ถูกต้องหรือหมดอายุ
+        JWTError: ถ้า token ไม่ถูกต้องหรือหมดอายุ (คือ jwt.PyJWTError ครอบคลุมทุกชนิดของข้อผิดพลาด)
     """
-    return jwt.decode(token, _get_secret_key(), algorithms=[ALGORITHM])
+    # verify_iat=False: คงพฤติกรรมเดิมของ python-jose (ไม่ปฏิเสธ token ที่ iat ล้ำหน้านาฬิกาของเครื่องนี้)
+    # กัน instance ที่นาฬิกาเร็ว/ช้ากว่ากันปฏิเสธ token ของกันและกัน; exp ยังตรวจตามปกติ
+    # algorithms ระบุ HS256 เท่านั้น จึงปฏิเสธ alg=none และอัลกอริทึมอื่น
+    return jwt.decode(token, _get_secret_key(), algorithms=[ALGORITHM], options={"verify_iat": False})
 
 
 __all__ = ["encode_token", "decode_token", "ALGORITHM", "JWTError"]

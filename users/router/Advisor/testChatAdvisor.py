@@ -15,6 +15,8 @@ from fastapi.exceptions import WebSocketException
 from starlette import status as ws_status
 
 from users.auth.authUser import ensure_user_role, verify_user_token, get_user_id
+from common.url_safety import UnsafeUrl, validate_https_url
+from common.chat_limits import ChatInvalid, check_rest_text, chat_rate_ok, parse_ws_text, retry_after_seconds, WS_POLICY_VIOLATION
 
 from common.notify import CHATBOT_INTERNAL_HEADERS, CHATBOT_URL
 
@@ -42,6 +44,35 @@ class ChatMessageBody(BaseModel):
 class ChatAppointmentBody(BaseModel):
     student_id: str
     url: str
+
+
+async def ensure_advisor_has_student(advisor_id: str, student_id: str) -> None:
+    """อาจารย์ส่งข้อความ/ลิงก์ได้เฉพาะนักศึกษาที่มีคิวร่วมกัน (สถานะเดียวกับที่หน้าแชทและ WebSocket ใช้)
+
+    เดิม REST endpoint ไม่ตรวจข้อนี้ ทำให้อาจารย์ส่งข้อความเข้าห้องแชทของนักศึกษาคนใดก็ได้
+    และสั่งให้ ChatBot ส่งลิงก์ไปที่ LINE user ใดก็ได้
+    """
+    booking = await db["BookingOnline"].find_one({
+        "UserId": student_id, "AdvisorId": advisor_id, "Status": {"$in": ACTIVE_STATUSES},
+    })
+    if not booking:
+        raise HTTPException(status_code=403, detail="ไม่มีสิทธิ์ส่งข้อความถึงนักศึกษาคนนี้ (ไม่มีคิวร่วมกัน)")
+
+
+def _enforce_rate_limit(user_id: str) -> None:
+    """จำกัดความถี่การส่งข้อความ/ลิงก์ต่อผู้ใช้ (นับรวมกับ WebSocket) เกินแล้วตอบ 429"""
+    if not chat_rate_ok(user_id):
+        raise HTTPException(
+            status_code=429,
+            detail="ส่งข้อความถี่เกินไป กรุณารอสักครู่",
+            headers={"Retry-After": str(retry_after_seconds())},
+        )
+
+
+def _allowed_link_hosts() -> list[str]:
+    """CHAT_LINK_ALLOWED_HOSTS (คั่นด้วยจุลภาค) จำกัดโดเมนของลิงก์นัดหมาย; ว่าง = ไม่จำกัดโดเมน"""
+    raw = os.getenv("CHAT_LINK_ALLOWED_HOSTS") or ""
+    return [h.strip() for h in raw.split(",") if h.strip()]
 
 
 # ── ห้องแชท: เก็บ connection ที่เปิดอยู่ แยกตาม student_id (ให้ student_chat.py import ไปใช้ตัวเดียวกัน) ──
@@ -128,14 +159,20 @@ async def send_chat_message(body: ChatMessageBody, request: Request):
         payload = verify_user_token(request)
         ensure_user_role(payload, "Advisor")
         advisor_id = get_user_id(payload)
+        _enforce_rate_limit(advisor_id)
+        await ensure_advisor_has_student(advisor_id, body.student_id)
+        try:
+            text = check_rest_text(body.text)
+        except ChatInvalid as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
         now = datetime.now(timezone.utc)
 
         await db["ChatMessages"].insert_one({
             "student_id": body.student_id, "advisor_id": advisor_id,
-            "sender": "teacher", "type": "text", "text": body.text, "timestamp": now,
+            "sender": "teacher", "type": "text", "text": text, "timestamp": now,
         })
         await room_broadcast(body.student_id, {
-            "sender": "teacher", "type": "text", "text": body.text,
+            "sender": "teacher", "type": "text", "text": text,
             "timestamp": now.isoformat().replace("+00:00", "Z"),
         })
         return {"message": "ส่งข้อความสำเร็จ"}
@@ -152,14 +189,20 @@ async def send_chat_appointment(body: ChatAppointmentBody, request: Request):
         payload = verify_user_token(request)
         ensure_user_role(payload, "Advisor")
         advisor_id = get_user_id(payload)
+        _enforce_rate_limit(advisor_id)
+        await ensure_advisor_has_student(advisor_id, body.student_id)
+        try:
+            url = validate_https_url(body.url, allowed_hosts=_allowed_link_hosts())
+        except UnsafeUrl as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
         now = datetime.now(timezone.utc)
 
         await db["ChatMessages"].insert_one({
             "student_id": body.student_id, "advisor_id": advisor_id,
-            "sender": "teacher", "type": "link", "text": body.url, "timestamp": now,
+            "sender": "teacher", "type": "link", "text": url, "timestamp": now,
         })
         await room_broadcast(body.student_id, {
-            "sender": "teacher", "type": "link", "text": body.url,
+            "sender": "teacher", "type": "link", "text": url,
             "timestamp": now.isoformat().replace("+00:00", "Z"),
         })
 
@@ -167,7 +210,7 @@ async def send_chat_appointment(body: ChatAppointmentBody, request: Request):
             try:
                 await http.post(
                     SERVER_CHATBOT_URL,
-                    json={"line_user_id": body.student_id, "url": body.url},
+                    json={"line_user_id": body.student_id, "url": url},
                     timeout=5.0,
                     headers=CHATBOT_INTERNAL_HEADERS,
                 )
@@ -203,15 +246,27 @@ async def advisor_chat_ws(
 
     try:
         while True:
-            data = await websocket.receive_json()
+            raw = await websocket.receive_text()
+            try:
+                text = parse_ws_text(raw)
+            except ChatInvalid as exc:
+                room_disconnect(student_id, websocket)
+                await websocket.close(code=exc.code)
+                return
+            if text is None:
+                continue
+            if not chat_rate_ok(advisor_id):
+                room_disconnect(student_id, websocket)
+                await websocket.close(code=WS_POLICY_VIOLATION)
+                return
             now = datetime.now(timezone.utc)
 
             await db["ChatMessages"].insert_one({
                 "student_id": student_id, "advisor_id": advisor_id,
-                "sender": "teacher", "type": "text", "text": data.get("text", ""), "timestamp": now,
+                "sender": "teacher", "type": "text", "text": text, "timestamp": now,
             })
             await room_broadcast(student_id, {
-                "sender": "teacher", "type": "text", "text": data.get("text", ""),
+                "sender": "teacher", "type": "text", "text": text,
                 "timestamp": now.isoformat().replace("+00:00", "Z"),
             })
     except WebSocketDisconnect:

@@ -4,10 +4,9 @@ logger = logging.getLogger(__name__)
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from ...Database.ConnectDB import Connect_MongoDB
 from ...auth.authUser import verify_user_token, get_user_id
-from datetime import datetime, timezone,timedelta
+from datetime import datetime, timezone
 from pydantic import BaseModel
 from dotenv import load_dotenv
-import os
 from ..Students.BookingOnline import auto_update_status, recalculate_slot_booked as sync_slot_booking
 from common.slot_service import is_within_advisor_cutoff_window, can_cancel_approved
 from common.notify import CHATBOT_INTERNAL_HEADERS, CHATBOT_URL, notify_chatbot
