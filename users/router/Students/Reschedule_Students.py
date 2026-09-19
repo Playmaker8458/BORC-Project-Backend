@@ -9,17 +9,21 @@ import requests as req  # ไม่ได้เรียกตรงนี้แ
                          # tests/test_security_fixes.py เข้าถึง module.req โดยตรง
 from dotenv import load_dotenv
 import os
-from common.slot_service import is_within_cutoff, update_slot
-from common.notify import notify_chatbot
+from common.slot_service import (
+    ensure_slot_open_for_reschedule,
+    get_reschedule_available_dates,
+    is_within_cutoff,
+    move_booking_to_slot,
+    split_time_range,
+)
+from common.notify import CHATBOT_INTERNAL_HEADERS, CHATBOT_URL, notify_chatbot
 from common.queue_history import log_queue_management_history
 
 
 router = APIRouter()
 
 load_dotenv(override=True)
-chatbot_uri = os.getenv("ChatBot_URL")
-# ส่ง shared-secret header ไปให้บริการ ChatBot ตรวจสอบว่า request มาจาก backend นี้จริง
-CHATBOT_INTERNAL_HEADERS = {"X-Internal-Secret": os.getenv("INTERNAL_SERVICE_SECRET", "")}
+chatbot_uri = CHATBOT_URL
 
 ACTIVE_STATUSES = ["Pending", "Approved", "InProgress", "Rescheduled"]
 
@@ -44,7 +48,7 @@ class RescheduleForm:
 # GET /reschedule/BookingInfo
 # ---------------------------------------------------------------------------
 @router.get("/BookingInfo")
-async def get_booking_info(request: Request):
+def get_booking_info(request: Request):
     try:
         payload = verify_user_token(request)
         user_id = get_user_id(payload)
@@ -103,7 +107,7 @@ async def get_booking_info(request: Request):
 # GET /reschedule/AvailableSlots
 # ---------------------------------------------------------------------------
 @router.get("/AvailableSlots")
-async def get_available_slots(request: Request):
+def get_available_slots(request: Request):
     try:
         payload = verify_user_token(request)
         user_id = get_user_id(payload)
@@ -125,46 +129,7 @@ async def get_available_slots(request: Request):
         if not advisor_id:
             return {"dates": {}}
 
-        tz_utc7  = timezone(timedelta(hours=7))
-        min_date = (datetime.now(timezone.utc).astimezone(tz_utc7) + timedelta(days=1)).strftime("%Y-%m-%d")
-
-        docs = list(db["ManageTimeSlots"].find(
-            {"advisorId": advisor_id},
-            {"_id": 0, "dates": 1}
-        ))
-
-        if not docs:
-            return {"dates": {}}
-
-        merged_dates: dict = {}
-
-        for doc in docs:
-            for date, slots in doc.get("dates", {}).items():
-                if not isinstance(slots, list) or date < min_date:
-                    continue
-
-                available_slots = []
-                for s in slots:
-                    is_closed = s.get("isLocked", False) or s.get("is_closed", False)
-                    booked    = s.get("booked", 0)
-                    max_book  = s.get("max_booking", 1)
-                    available = max(0, max_book - booked)
-
-                    if is_closed or available <= 0:
-                        continue
-
-                    available_slots.append({
-                        "start"      : s["start"],
-                        "end"        : s["end"],
-                        "label"      : s.get("label", ""),
-                        "available"  : available,
-                        "max_booking": max_book,
-                    })
-
-                if available_slots:
-                    merged_dates[date] = available_slots
-
-        return {"dates": merged_dates}
+        return {"dates": get_reschedule_available_dates(db, advisor_id)}
 
     except HTTPException:
         raise
@@ -174,8 +139,59 @@ async def get_available_slots(request: Request):
 
 
 # API เลื่อนคิวการจองของนักศึกษา
+def _load_reschedulable_booking(db, user_id: str) -> tuple[dict, str, str]:
+    """ดึงคิวที่นักศึกษาเลื่อนได้ พร้อมเวลาเดิม; raise HTTPException ถ้าเลื่อนไม่ได้"""
+    booking = db["BookingOnline"].find_one(
+        {"UserId": user_id, "Status": {"$in": ACTIVE_STATUSES}}
+    )
+    if not booking:
+        raise HTTPException(status_code=404, detail="ไม่พบข้อมูลการจอง")
+
+    if booking["Status"] != "Approved":
+        raise HTTPException(
+            status_code=400,
+            detail="สามารถเลื่อนคิวได้เฉพาะเมื่อสถานะเป็น 'อนุมัติแล้ว' เท่านั้น"
+        )
+
+    if booking.get("RescheduledOnce", False):
+        raise HTTPException(
+            status_code=400,
+            detail="คุณได้เลื่อนคิวไปแล้ว 1 ครั้ง ไม่สามารถเลื่อนได้อีก"
+        )
+
+    old_start, old_end = split_time_range(booking.get("Time", ""))
+    if old_start and is_within_cutoff(booking.get("Date", ""), old_start):
+        raise HTTPException(
+            status_code=400,
+            detail="ไม่สามารถเลื่อนคิวได้ เนื่องจากเหลือเวลาน้อยกว่า 1 ชั่วโมงก่อนเวลานัด"
+        )
+
+    return booking, old_start, old_end
+
+
+def _insert_reschedule_history(db, user_id, booking, data, old_start, old_end, now) -> None:
+    db["RescheduleHistory"].insert_one({
+        "rescheduledById"  : user_id,
+        "rescheduledByRole": "Student",
+        "bookingId"        : str(booking["_id"]),
+        "advisorName"      : booking.get("Advisor_Name", ""),
+        "studentName"      : booking.get("StudentName", ""),
+        "oldDate"          : booking.get("Date", ""),
+        "oldStart"         : old_start,
+        "oldEnd"           : old_end,
+        "newDate"          : data.new_date,
+        "newStart"         : data.new_start,
+        "newEnd"           : data.new_end,
+        "newLabel"         : data.new_label,
+        "rescheduledReason": data.reason,
+        "status"           : "Rescheduled",
+        "createdAt"        : now,
+        "updatedAt"        : now,
+    })
+
+
 @router.put("/RescheduleBooking")
-async def reschedule_booking(request: Request, background_tasks: BackgroundTasks, data: RescheduleForm = Depends()):
+def reschedule_booking(request: Request, background_tasks: BackgroundTasks, data: RescheduleForm = Depends()):
     try:
         payload = verify_user_token(request)
         user_id = get_user_id(payload)
@@ -183,136 +199,52 @@ async def reschedule_booking(request: Request, background_tasks: BackgroundTasks
         if not user_id:
             raise HTTPException(status_code=401, detail="ไม่พบ user_id ใน token เนื่องจากหมดอายุ")
 
-        db  = Connect_MongoDB()["BORC"]
-        col   = db["BookingOnline"]
-        booking = col.find_one(
-            {"UserId": user_id, "Status": {"$in": ACTIVE_STATUSES}}
-        )
-
-        if not booking:
-            raise HTTPException(status_code=404, detail="ไม่พบข้อมูลการจอง")
-
-        if booking["Status"] != "Approved":
-            raise HTTPException(
-                status_code=400,
-                detail="สามารถเลื่อนคิวได้เฉพาะเมื่อสถานะเป็น 'อนุมัติแล้ว' เท่านั้น"
-            )
-
-        if booking.get("RescheduledOnce", False):
-            raise HTTPException(
-                status_code=400,
-                detail="คุณได้เลื่อนคิวไปแล้ว 1 ครั้ง ไม่สามารถเลื่อนได้อีก"
-            )
-
-        time_str   = booking.get("Time", "")
-        time_parts = [t.strip() for t in time_str.split("-")] if "-" in time_str else []
-
-        old_start  = time_parts[0] if len(time_parts) == 2 else ""
-        old_end    = time_parts[1] if len(time_parts) == 2 else ""
-
-        if old_start and is_within_cutoff(booking.get("Date", ""), old_start):
-            raise HTTPException(
-                status_code=400,
-                detail="ไม่สามารถเลื่อนคิวได้ เนื่องจากเหลือเวลาน้อยกว่า 1 ชั่วโมงก่อนเวลานัด"
-            )
+        db = Connect_MongoDB()["BORC"]
+        booking, old_start, old_end = _load_reschedulable_booking(db, user_id)
 
         if not data.reason.strip():
             raise HTTPException(status_code=400, detail="กรุณาระบุเหตุผลในการเลื่อนคิว")
 
         advisor_id   = booking.get("AdvisorId", "")
         advisor_name = booking.get("Advisor_Name", "")
+        student_name = booking.get("StudentName", "")
 
-        # ตรวจ slot ใหม่ว่าว่างอยู่
         if advisor_id:
-            slot_doc = db["ManageTimeSlots"].find_one(
-                {
-                    "advisorId"              : advisor_id,
-                    f"dates.{data.new_date}" : {"$exists": True},
-                },
-                {"dates": 1}
-            )
-            if slot_doc:
-                slots  = slot_doc.get("dates", {}).get(data.new_date, [])
-                target = next(
-                    (s for s in slots if s.get("start") == data.new_start and s.get("end") == data.new_end),
-                    None
-                )
-                if not target:
-                    raise HTTPException(status_code=404, detail="ไม่พบช่วงเวลาที่เลือก")
-                if target.get("isLocked", False) or target.get("is_closed", False):
-                    raise HTTPException(status_code=400, detail="ช่วงเวลานี้ปิดให้บริการแล้ว")
-                if target.get("booked", 0) >= target.get("max_booking", 1):
-                    raise HTTPException(status_code=400, detail="ช่วงเวลานี้เต็มแล้ว กรุณาเลือกช่วงเวลาอื่น")
+            ensure_slot_open_for_reschedule(db, advisor_id, data.new_date, data.new_start, data.new_end)
 
         now = datetime.now(timezone.utc)
-        booking_id = str(booking["_id"])
-
-        # 1. อัปเดต booking
-        col.update_one(
-            {"_id": booking["_id"]},
-            {"$set": {
-                "Date"           : data.new_date,
-                "Time"           : f"{data.new_start}-{data.new_end}",
-                "Status"         : "Rescheduled",
-                "RescheduledOnce": True,
-                "UpdatedAt"      : now,
-            }}
+        move_booking_to_slot(
+            db, booking, advisor_id,
+            data.new_date, data.new_start, data.new_end, old_start, old_end,
+            extra_fields={"RescheduledOnce": True},
+            now=now,
         )
+        _insert_reschedule_history(db, user_id, booking, data, old_start, old_end, now)
 
-        # 2. ✅ คืน slot เก่า
-        if advisor_id and old_start and old_end:
-            update_slot(db, advisor_id, booking.get("Date", ""), old_start, old_end, action="release")
-
-        # 3. ✅ จอง slot ใหม่
-        if advisor_id:
-            update_slot(db, advisor_id, data.new_date, data.new_start, data.new_end, action="book")
-
-        # 4. บันทึก history
-        db["RescheduleHistory"].insert_one({
-            "rescheduledById"  : user_id,
-            "rescheduledByRole": "Student",
-            "bookingId"        : booking_id,
-            "advisorName"      : advisor_name,
-            "studentName"      : booking.get("StudentName", ""),
-            "oldDate"          : booking.get("Date", ""),
-            "oldStart"         : old_start,
-            "oldEnd"           : old_end,
-            "newDate"          : data.new_date,
-            "newStart"         : data.new_start,
-            "newEnd"           : data.new_end,
-            "newLabel"         : data.new_label,
-            "rescheduledReason": data.reason,
-            "status"           : "Rescheduled",
-            "createdAt"        : now,
-            "updatedAt"        : now,
-        })
-
-        # ส่งการแจ้งเตือนไปให้ advisor นักศึกษาเลื่อนคิว (background — ไม่บล็อก event loop)
-        advisor_id = booking.get("AdvisorId", "")
+        # แจ้งอาจารย์ว่านักศึกษาเลื่อนคิว (background — ไม่บล็อก event loop)
         background_tasks.add_task(
             notify_chatbot,
             f"{chatbot_uri}/NotifyQueueAdivsor/RecheduleAdvisor",
             {
                 "AdvisorId"  : advisor_id,  # userId ของ Advisor
-                "StudentName": booking.get("StudentName", ""),
+                "StudentName": student_name,
                 "Date"       : data.new_date,
                 "Time"       : f"{data.new_start}-{data.new_end}",
                 "Status"     : "Rescheduled"
             },
             CHATBOT_INTERNAL_HEADERS,
         )
-            
+
         log_queue_management_history(
             db,
             advisor_id=advisor_id,
             advisor_name=advisor_name,
             student_id=user_id,
-            student_name=booking.get("StudentName", ""),
+            student_name=student_name,
             status="Rescheduled",
             reason=data.reason,
             now=now,
         )
-
 
         return {"message": "เลื่อนคิวสำเร็จ"}
 

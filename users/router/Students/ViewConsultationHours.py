@@ -5,18 +5,16 @@ from ...Database.ConnectDB import Connect_MongoDB
 from users.auth.authUser import verify_user_token
 from datetime import datetime, timezone, timedelta
 
+from common.slot_service import get_today_str
+
 router = APIRouter()
 logger = logging.getLogger(__name__)
-
-
-def get_today_str() -> str:
-    return (datetime.now(timezone.utc) + timedelta(hours=7)).strftime("%Y-%m-%d")
 
 
 # ─── GET /advisor-slots/Advisors ─────────────────────────────────────────────
 # ดึงรายชื่ออาจารย์ทั้งหมดที่มี slot ว่าง
 @router.get("/Advisors")
-async def get_advisors(request: Request):
+def get_advisors(request: Request):
     try:
         verify_user_token(request)
         db       = Connect_MongoDB()["BORC"]
@@ -65,7 +63,7 @@ async def get_advisors(request: Request):
 # ─── GET /advisor-slots/Slots/{advisor_id} ────────────────────────────────────
 # ดึง slot ทั้งหมดของอาจารย์คนนั้น พร้อมสถานะ
 @router.get("/Slots/{advisor_id}")
-async def get_advisor_slots(advisor_id: str, request: Request):
+def get_advisor_slots(advisor_id: str, request: Request):
     try:
         verify_user_token(request)
         db    = Connect_MongoDB()["BORC"]

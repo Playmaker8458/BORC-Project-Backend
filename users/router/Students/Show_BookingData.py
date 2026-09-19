@@ -29,7 +29,7 @@ def get_booking_by_user(user_id: str) -> list:
         )
 
 @router.get("/ShowData")
-async def Show_Data_BookingOnline(payload: dict = Depends(verify_user_token)):
+def Show_Data_BookingOnline(payload: dict = Depends(verify_user_token)):
     try:
         user_id  = payload["user_id"]
         bookings = get_booking_by_user(user_id)
@@ -48,7 +48,7 @@ async def Show_Data_BookingOnline(payload: dict = Depends(verify_user_token)):
 
 
 @router.get("/BookingStats")
-async def Get_Booking_Stats(payload: dict = Depends(verify_user_token)):
+def Get_Booking_Stats(payload: dict = Depends(verify_user_token)):
     try:
         user_id = get_user_id(payload)
         if not user_id:

@@ -3,7 +3,7 @@ import logging
 logger = logging.getLogger(__name__)
 from fastapi import APIRouter, HTTPException, Request
 from ...Database.ConnectDB import Connect_MongoDB
-from users.auth.authUser import verify_user_token
+from users.auth.authUser import get_current_advisor
 from datetime import datetime, timezone, timedelta
 
 router = APIRouter()
@@ -19,17 +19,8 @@ def get_db():
         raise HTTPException(status_code=500, detail="ไม่สามารถเชื่อมต่อฐานข้อมูลได้")
 
 
-def get_current_advisor(request: Request) -> dict:
-    payload = verify_user_token(request)
-    if not payload or "user_id" not in payload:
-        raise HTTPException(status_code=401, detail="Token ไม่ถูกต้องหรือหมดอายุ")
-    if payload.get("role") != "Advisor":
-        raise HTTPException(status_code=403, detail="ใช้งานได้เฉพาะอาจารย์เท่านั้น")
-    return payload
-
-
 @router.get("/All")
-async def get_all_queue_history(request: Request):
+def get_all_queue_history(request: Request):
     try:
         payload = get_current_advisor(request)
         db = get_db()

@@ -1,3 +1,4 @@
+import time
 import logging
 import os
 from datetime import datetime, timedelta, timezone
@@ -242,6 +243,38 @@ def set_user_session(request: Request, response: Response, token: str):
 
 
 # ============================================================
+# Short-lived cache for per-request user lookup
+# ============================================================
+# verify_user_token ทำงานทุก request; เดิมยิง MongoDB Atlas 1 รอบต่อ request (ข้ามเครือข่าย
+# Railway -> Atlas) ตอนนี้ cache ผลไว้สั้น ๆ เพื่อลด round trip ผลข้างเคียง: การเปลี่ยน
+# Role/Status ของผู้ใช้จะมีผลภายใน _USER_CACHE_TTL_SEC วินาที
+_USER_CACHE_TTL_SEC = 15
+_USER_CACHE_MAX = 2048
+_user_cache: dict[str, tuple[float, dict | None]] = {}
+
+
+def _get_user_cached(user_id: str) -> dict | None:
+    now = time.monotonic()
+    hit = _user_cache.get(user_id)
+    if hit and now - hit[0] < _USER_CACHE_TTL_SEC:
+        return hit[1]
+    user = get_UserDB(user_id)
+    # cache เฉพาะบัญชีที่อนุมัติแล้ว: ผู้ใช้ที่เพิ่งได้รับอนุมัติต้องเข้าใช้งานได้ทันที
+    if user and user.get("Status") == ACTIVE_STATUS:
+        if len(_user_cache) >= _USER_CACHE_MAX:
+            _user_cache.clear()
+        _user_cache[user_id] = (now, user)
+    return user
+
+
+def invalidate_user_cache(user_id: str | None = None) -> None:
+    if user_id is None:
+        _user_cache.clear()
+    else:
+        _user_cache.pop(user_id, None)
+
+
+# ============================================================
 # Verify User JWT
 # ============================================================
 
@@ -276,7 +309,7 @@ def verify_user_token(request: Request):
                 detail="Token ไม่ถูกต้อง",
             )
 
-        db_user = get_UserDB(user_id)
+        db_user = _get_user_cached(user_id)
 
         if not db_user:
             raise HTTPException(
@@ -313,6 +346,25 @@ def verify_user_token(request: Request):
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Token ไม่ถูกต้อง หรือหมดอายุ",
         )
+
+def _require_role(request: Request, role: str, detail: str) -> dict:
+    payload = verify_user_token(request)
+    if not payload or "user_id" not in payload:
+        raise HTTPException(status_code=401, detail="Token ไม่ถูกต้องหรือหมดอายุ")
+    if payload.get("role") != role:
+        raise HTTPException(status_code=403, detail=detail)
+    return payload
+
+
+def get_current_advisor(request: Request) -> dict:
+    """verify_user_token + บังคับว่าต้องเป็นอาจารย์ (ใช้แทนสำเนาที่เคยมีในแต่ละ router)"""
+    return _require_role(request, "Advisor", "ใช้งานได้เฉพาะอาจารย์เท่านั้น")
+
+
+def get_current_student(request: Request) -> dict:
+    """verify_user_token + บังคับว่าต้องเป็นนักศึกษา"""
+    return _require_role(request, "Student", "ใช้งานได้เฉพาะนักศึกษาเท่านั้น")
+
 
 
 def get_user_id(payload: dict) -> str | None:

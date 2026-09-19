@@ -16,14 +16,14 @@ from starlette import status as ws_status
 
 from users.auth.authUser import ensure_user_role, verify_user_token, get_user_id
 
+from common.notify import CHATBOT_INTERNAL_HEADERS, CHATBOT_URL
+
 load_dotenv(override=True)
 router = APIRouter()
 
 ACTIVE_STATUSES = ["Pending", "Approved", "Rescheduled", "InProgress", "Completed"]
 
-chatbot_uri = os.getenv("ChatBot_URL")
-# ส่ง shared-secret header ไปให้บริการ ChatBot ตรวจสอบว่า request มาจาก backend นี้จริง
-CHATBOT_INTERNAL_HEADERS = {"X-Internal-Secret": os.getenv("INTERNAL_SERVICE_SECRET", "")}
+chatbot_uri = CHATBOT_URL
 SERVER_CHATBOT_URL = f"{chatbot_uri}/NotifyChat/send_url/notification" #ยังไม่ได้ใช้ของจริง
 
 # ⚠️ client/db/rooms เป็น module-level state ตัวเดียวที่ ChatStudent.py import ไปใช้ร่วมกัน

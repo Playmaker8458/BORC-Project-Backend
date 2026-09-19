@@ -6,10 +6,19 @@
 """
 
 import logging
+import os
 
 import requests
+from dotenv import load_dotenv
 
 logger = logging.getLogger(__name__)
+
+load_dotenv(override=True)
+
+# URL ของ ChatBot service และ shared-secret header ที่ใช้ยืนยันว่า request มาจาก backend นี้
+# (เดิมประกาศซ้ำในทุก router ที่แจ้งเตือน)
+CHATBOT_URL = os.getenv("ChatBot_URL")
+CHATBOT_INTERNAL_HEADERS = {"X-Internal-Secret": os.getenv("INTERNAL_SERVICE_SECRET", "")}
 
 
 def notify_chatbot(url: str, payload: dict, headers: dict, timeout: int = 5):

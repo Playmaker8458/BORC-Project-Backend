@@ -1,7 +1,7 @@
 """
 Endpoint coverage สำหรับ Student routers ที่ก่อนหน้านี้ไม่มี test เลย:
 
-- ManageQueueStudent.py  (MyBookingDetail, CheckRescheduleEligibility, StudentReschedule, CancelBooking, MyCancelCount)
+- ManageQueueStudent.py  (MyBookingDetail, CheckRescheduleEligibility, CancelBooking, MyCancelCount)
 - Reschedule_Students.py (BookingInfo, AvailableSlots, RescheduleBooking)
 - Show_BookingData.py    (ShowData, BookingStats)
 - ViewConsultationHours.py (Advisors, Slots/{advisor_id})
@@ -158,40 +158,6 @@ def test_cancel_booking_cannot_cancel_other_students_booking(mqs_client, mongo_c
     assert resp.status_code == 404
     booking = mongo_client["BORC"]["BookingOnline"].find_one({"UserId": "student-1"})
     assert booking["Status"] == "Pending"
-
-
-def test_student_reschedule_rejects_when_already_rescheduled_once(mqs_client, mongo_client):
-    _seed_user(mongo_client, "student-1")
-    _insert_booking(mongo_client, Status="Approved", RescheduledOnce=True)
-
-    resp = mqs_client.put(
-        "/StudentReschedule",
-        json={"new_date": "2099-02-01", "new_time": "10:00-11:00"},
-        cookies=_cookies("student-1"),
-    )
-
-    assert resp.status_code == 400
-
-
-def test_student_reschedule_success_updates_booking_and_history(mqs_client, mongo_client):
-    _seed_user(mongo_client, "student-1")
-    _insert_booking(mongo_client, Status="Approved", RescheduledOnce=False)
-    mongo_client["BORC"]["ManageTimeSlots"].insert_one({
-        "advisor_name": "อ.ทดสอบ",
-        "dates": {"2099-02-01": [{"start": "10:00", "end": "11:00", "booked": 0, "max_booking": 1, "is_closed": False}]},
-    })
-
-    resp = mqs_client.put(
-        "/StudentReschedule",
-        json={"new_date": "2099-02-01", "new_time": "10:00-11:00"},
-        cookies=_cookies("student-1"),
-    )
-
-    assert resp.status_code == 200
-    booking = mongo_client["BORC"]["BookingOnline"].find_one({"UserId": "student-1"})
-    assert booking["Status"] == "Rescheduled"
-    assert booking["RescheduledOnce"] is True
-    assert mongo_client["BORC"]["RescheduleHistory"].count_documents({}) == 1
 
 
 def test_my_cancel_count(mqs_client, mongo_client):

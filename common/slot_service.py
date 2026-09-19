@@ -8,6 +8,8 @@ Advisor/ManageQueueAdvisor.py, Advisor/Rechedule_Advisor.py ซึ่งแต�
 import logging
 from datetime import datetime, timedelta, timezone
 
+from fastapi import HTTPException
+
 logger = logging.getLogger(__name__)
 
 # นักศึกษามีนัดที่ยังใช้งานอยู่ได้เพียงหนึ่งรายการ; ใช้เช็คว่า slot ควรถูกล็อกหรือไม่
@@ -194,3 +196,122 @@ def update_slot(db, advisor_id: str, date: str, start: str, end: str, action: st
 
     except Exception as e:
         logger.warning(f"[WARN] update_slot failed: {e}")
+
+
+def get_now_utc7() -> datetime:
+    return datetime.now(timezone.utc).astimezone(_TZ_UTC7)
+
+
+def get_today_str() -> str:
+    """วันนี้ (UTC+7) รูปแบบ YYYY-MM-DD"""
+    return get_now_utc7().strftime("%Y-%m-%d")
+
+
+def get_tomorrow_str() -> str:
+    """วันพรุ่งนี้ (UTC+7) รูปแบบ YYYY-MM-DD"""
+    return (get_now_utc7() + timedelta(days=1)).strftime("%Y-%m-%d")
+
+
+def get_reschedule_available_dates(db, advisor_id: str) -> dict:
+    """slot ที่ยังว่างของอาจารย์ตั้งแต่ "พรุ่งนี้" เป็นต้นไป รูปแบบ {date: [slot, ...]}
+
+    ใช้ร่วมกันโดยหน้าเลื่อนคิวของนักศึกษาและอาจารย์ (เดิมเป็นสำเนาโค้ดเดียวกันสองที่)
+    """
+    min_date = get_tomorrow_str()
+
+    docs = list(db["ManageTimeSlots"].find(
+        {"advisorId": advisor_id},
+        {"_id": 0, "dates": 1}
+    ))
+
+    merged_dates: dict = {}
+    for doc in docs:
+        for date, slots in doc.get("dates", {}).items():
+            if not isinstance(slots, list) or date < min_date:
+                continue
+
+            available_slots = []
+            for s in slots:
+                is_closed = s.get("isLocked", False) or s.get("is_closed", False)
+                booked = s.get("booked", 0)
+                max_book = s.get("max_booking", 1)
+                available = max(0, max_book - booked)
+
+                if is_closed or available <= 0:
+                    continue
+
+                available_slots.append({
+                    "start": s["start"],
+                    "end": s["end"],
+                    "label": s.get("label", ""),
+                    "available": available,
+                    "max_booking": max_book,
+                })
+
+            if available_slots:
+                merged_dates[date] = available_slots
+
+    return merged_dates
+
+
+def split_time_range(time_str: str) -> tuple[str, str]:
+    """"09:00-10:00" -> ("09:00", "10:00"); รูปแบบไม่ถูกต้อง -> ("", "")"""
+    parts = [t.strip() for t in time_str.split("-")] if "-" in time_str else []
+    if len(parts) == 2:
+        return parts[0], parts[1]
+    return "", ""
+
+
+def ensure_slot_open_for_reschedule(db, advisor_id: str, date: str, start: str, end: str) -> None:
+    """ตรวจว่า slot ปลายทางที่จะเลื่อนคิวไปยังว่างอยู่ (raise HTTPException ถ้าไม่ว่าง)
+
+    ถ้าไม่พบ document ของอาจารย์ในวันนั้นเลยจะไม่ raise (พฤติกรรมเดิมของทั้งสองหน้าเลื่อนคิว)
+    """
+    slot_doc = db["ManageTimeSlots"].find_one(
+        {"advisorId": advisor_id, f"dates.{date}": {"$exists": True}},
+        {"dates": 1},
+    )
+    if not slot_doc:
+        return
+
+    slots = slot_doc.get("dates", {}).get(date, [])
+    target = next((s for s in slots if s.get("start") == start and s.get("end") == end), None)
+    if not target:
+        raise HTTPException(status_code=404, detail="ไม่พบช่วงเวลาที่เลือก")
+    if target.get("isLocked", False) or target.get("is_closed", False):
+        raise HTTPException(status_code=400, detail="ช่วงเวลานี้ปิดให้บริการแล้ว")
+    if target.get("booked", 0) >= target.get("max_booking", 1):
+        raise HTTPException(status_code=400, detail="ช่วงเวลานี้เต็มแล้ว กรุณาเลือกช่วงเวลาอื่น")
+
+
+def move_booking_to_slot(
+    db,
+    booking: dict,
+    advisor_id: str,
+    new_date: str,
+    new_start: str,
+    new_end: str,
+    old_start: str,
+    old_end: str,
+    extra_fields: dict,
+    now: datetime,
+) -> None:
+    """ย้าย booking ไปช่วงเวลาใหม่: อัปเดต booking -> คืน slot เก่า -> จอง slot ใหม่
+
+    extra_fields = ฟิลด์เฉพาะฝั่งผู้เลื่อน (นักศึกษา: RescheduledOnce, อาจารย์: AdvisorRescheduledOnce)
+    """
+    db["BookingOnline"].update_one(
+        {"_id": booking["_id"]},
+        {"$set": {
+            "Date": new_date,
+            "Time": f"{new_start}-{new_end}",
+            "Status": "Rescheduled",
+            **extra_fields,
+            "UpdatedAt": now,
+        }},
+    )
+
+    if advisor_id and old_start and old_end:
+        update_slot(db, advisor_id, booking.get("Date", ""), old_start, old_end, action="release")
+    if advisor_id:
+        update_slot(db, advisor_id, new_date, new_start, new_end, action="book")

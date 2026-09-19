@@ -7,9 +7,11 @@ from typing import List, Dict
 from fastapi import APIRouter, HTTPException, Request, Depends
 from pydantic import BaseModel, field_validator
 from ...Database.ConnectDB import Connect_MongoDB
-from ...auth.authUser import verify_user_token
+from ...auth.authUser import get_current_advisor, verify_user_token
 import re
 from datetime import datetime, timezone, timedelta, date as date_type
+
+from common.slot_service import get_today_str
 
 router = APIRouter()
 
@@ -74,10 +76,6 @@ def get_label(start: str) -> str:
 
 def get_today_utc7() -> date_type:
     return (datetime.now(timezone.utc) + timedelta(hours=7)).date()
-
-
-def get_today_str() -> str:
-    return (datetime.now(timezone.utc) + timedelta(hours=7)).strftime("%Y-%m-%d")
 
 
 def validate_date_format_read(date: str) -> None:
@@ -176,15 +174,6 @@ def get_db_collection():
         raise HTTPException(status_code=500, detail="ไม่สามารถเชื่อมต่อฐานข้อมูลได้")
 
 
-def get_current_advisor(request: Request) -> dict:
-    payload = verify_user_token(request)
-    if not payload or "user_id" not in payload:
-        raise HTTPException(status_code=401, detail="Token ไม่ถูกต้องหรือหมดอายุ")
-    if payload.get("role") != "Advisor":
-        raise HTTPException(status_code=403, detail="ไม่ใช่อาจารย์ ใช้งานได้เฉพาะอาจารย์เท่านั้น")
-    return payload
-
-
 def advisor_filter(payload: dict) -> dict:
     return {"advisorId": payload["user_id"]}
 
@@ -199,7 +188,7 @@ def create_timeslot_indexes(db):
 # GET /MyTimeSlots/{date}
 # ─────────────────────────────────────────
 @router.get("/MyTimeSlots/{date}")
-async def get_my_time_slots(date: str, request: Request):
+def get_my_time_slots(date: str, request: Request):
     try:
         validate_date_format_read(date)
         payload = get_current_advisor(request)
@@ -236,7 +225,7 @@ async def get_my_time_slots(date: str, request: Request):
 # GET /MyTimeSlots/month/{month}
 # ─────────────────────────────────────────
 @router.get("/MyTimeSlots/month/{month}")
-async def get_my_time_slots_by_month(month: str, request: Request):
+def get_my_time_slots_by_month(month: str, request: Request):
     try:
         validate_month_format(month)
         payload = get_current_advisor(request)
@@ -276,7 +265,7 @@ async def get_my_time_slots_by_month(month: str, request: Request):
 # GET /TimeSlots
 # ─────────────────────────────────────────
 @router.get("/TimeSlots")
-async def get_time_slots(request: Request):
+def get_time_slots(request: Request):
     try:
         payload = get_current_advisor(request)
         today   = get_today_str()
@@ -341,7 +330,7 @@ async def get_time_slots(request: Request):
 # POST /SaveTimeSlots
 # ─────────────────────────────────────────
 @router.post("/SaveTimeSlots")
-async def save_time_slots(data: ManageTimeSlotsRequest, request: Request):
+def save_time_slots(data: ManageTimeSlotsRequest, request: Request):
     try:
         if not data.dates:
             raise HTTPException(status_code=400, detail="กรุณาเพิ่มช่วงเวลาอย่างน้อย 1 วัน")
@@ -429,7 +418,7 @@ async def save_time_slots(data: ManageTimeSlotsRequest, request: Request):
 # POST /CopyToAllDays
 # ─────────────────────────────────────────
 @router.post("/CopyToAllDays")
-async def copy_to_all_days(data: CopyToAllDaysRequest, request: Request):
+def copy_to_all_days(data: CopyToAllDaysRequest, request: Request):
     try:
         validate_month_format(data.target_month)
 
@@ -531,7 +520,7 @@ async def copy_to_all_days(data: CopyToAllDaysRequest, request: Request):
 # PUT /UpdateTimeSlots/{date}
 # ─────────────────────────────────────────
 @router.put("/UpdateTimeSlots/{date}")
-async def update_time_slot(date: str, data: UpdateSlotRequest, request: Request):
+def update_time_slot(date: str, data: UpdateSlotRequest, request: Request):
     try:
         # ─── FIX: ใช้ validate_date_format_delete_update แทน validate_date_format_write ───
         # เพราะ slot เดิมอาจอยู่ในวันที่ผ่านมาแล้ว (เช่น 2026-06-06) และยังต้องแก้ไขได้
@@ -615,7 +604,7 @@ async def update_time_slot(date: str, data: UpdateSlotRequest, request: Request)
 # DELETE /DeleteTimeSlots/{date}
 # ─────────────────────────────────────────
 @router.delete("/DeleteTimeSlots/{date}")
-async def delete_time_slot(date: str, data: DeleteSlotRequest, request: Request):
+def delete_time_slot(date: str, data: DeleteSlotRequest, request: Request):
     try:
         # ─── FIX: ใช้ validate_date_format_delete_update แทน validate_date_format_write ───
         # เพราะ slot เดิมอาจอยู่ในวันที่ผ่านมาแล้ว (เช่น 2026-06-06) และยังต้องลบได้

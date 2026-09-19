@@ -27,7 +27,7 @@ def get_today_consultation_students(advisor_id: str) -> list:
         raise HTTPException(status_code=500, detail="Internal server error")
 
 @router.get("/TodayQueue")
-async def get_today_queue(request: Request):
+def get_today_queue(request: Request):
     try:
         payload    = verify_user_token(request)
         advisor_id = get_user_id(payload)
@@ -47,7 +47,7 @@ async def get_today_queue(request: Request):
 
 
 @router.get("/AdvisorStats")
-async def Get_Advisor_Stats(request: Request):
+def Get_Advisor_Stats(request: Request):
     try:
         payload    = verify_user_token(request)
         advisor_id = get_user_id(payload)

@@ -29,7 +29,7 @@ class SaveScheduleBody(BaseModel):
 # GET /advisor-schedule/GetDaySlots/{date}
 # ---------------------------------------------------------------------------
 @router.get("/GetDaySlots/{date}")
-async def get_day_slots(date: str, request: Request):
+def get_day_slots(date: str, request: Request):
     try:
         payload    = verify_user_token(request)
         advisor_id = get_user_id(payload)
@@ -112,7 +112,7 @@ async def get_day_slots(date: str, request: Request):
 # PUT /advisor-schedule/SaveDaySchedule
 # ---------------------------------------------------------------------------
 @router.put("/SaveDaySchedule")
-async def save_day_schedule(body: SaveScheduleBody, request: Request):
+def save_day_schedule(body: SaveScheduleBody, request: Request):
     try:
         payload    = verify_user_token(request)
         advisor_id = get_user_id(payload)

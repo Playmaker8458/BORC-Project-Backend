@@ -10,15 +10,13 @@ from dotenv import load_dotenv
 import os
 from ..Students.BookingOnline import auto_update_status, recalculate_slot_booked as sync_slot_booking
 from common.slot_service import is_within_advisor_cutoff_window, can_cancel_approved
-from common.notify import notify_chatbot
+from common.notify import CHATBOT_INTERNAL_HEADERS, CHATBOT_URL, notify_chatbot
 from common.queue_history import log_queue_management_history
 
 router = APIRouter()
 
 load_dotenv(override=True)
-chatbot_uri = os.getenv("ChatBot_URL")
-# ส่ง shared-secret header ไปให้บริการ ChatBot ตรวจสอบว่า request มาจาก backend นี้จริง
-CHATBOT_INTERNAL_HEADERS = {"X-Internal-Secret": os.getenv("INTERNAL_SERVICE_SECRET", "")}
+chatbot_uri = CHATBOT_URL
 
 # ✅ เพิ่ม InProgress เข้า ACTIVE_STATUSES
 ACTIVE_STATUSES      = ["Pending", "Approved", "Rescheduled", "InProgress"]
@@ -44,14 +42,13 @@ class CompleteBody(BaseModel):
 
 # ─── GET /AdvisorQueues ───────────────────────────────────────────────────────
 @router.get("/AdvisorQueues")
-async def get_advisor_queues(request: Request):
+def get_advisor_queues(request: Request):
     try:
         payload      = verify_user_token(request)
         advisor_id   = get_user_id(payload)
         advisor_name = f"{payload['Prefix']}{payload['Firstname']} {payload['Lastname']}"
 
         db = Connect_MongoDB()["BORC"]
-        auto_update_status(db)
 
         bookings = list(
             db["BookingOnline"].find(
@@ -59,15 +56,23 @@ async def get_advisor_queues(request: Request):
             ).sort("Date", 1)
         )
 
+        # query เดียวแทน count_documents ต่อคิว (เดิม N+1 ข้ามเครือข่ายไป Atlas)
+        rescheduled_ids = {
+            h["bookingId"]
+            for h in db["RescheduleHistory"].find(
+                {
+                    "rescheduledById"  : advisor_id,
+                    "rescheduledByRole": "Advisor",
+                    "bookingId"        : {"$in": [str(b["_id"]) for b in bookings]},
+                },
+                {"bookingId": 1, "_id": 0},
+            )
+        }
+
         result = []
         for b in bookings:
             booking_id           = str(b["_id"])
-            reschedule_count     = db["RescheduleHistory"].count_documents({
-                "rescheduledById"  : advisor_id,
-                "rescheduledByRole": "Advisor",
-                "bookingId"        : booking_id,
-            })
-            b["has_rescheduled"] = reschedule_count > 0
+            b["has_rescheduled"] = booking_id in rescheduled_ids
 
             time_parts = b.get("Time", "").split("-")
             start_time = time_parts[0].strip() if len(time_parts) == 2 else ""
@@ -90,7 +95,7 @@ async def get_advisor_queues(request: Request):
 
 
 @router.put("/ConfirmQueue")
-async def confirm_queue(request: Request, body: ConfirmBody, background_tasks: BackgroundTasks):
+def confirm_queue(request: Request, body: ConfirmBody, background_tasks: BackgroundTasks):
     try:
         payload = verify_user_token(request)
         advisor_id = get_user_id(payload)
@@ -174,7 +179,7 @@ async def confirm_queue(request: Request, body: ConfirmBody, background_tasks: B
 
 
 @router.delete("/AdvisorCancelQueue")
-async def advisor_cancel_queue(request: Request, body: CancelBody, background_tasks: BackgroundTasks):
+def advisor_cancel_queue(request: Request, body: CancelBody, background_tasks: BackgroundTasks):
     try:
         payload = verify_user_token(request)
         advisor_id = get_user_id(payload)
@@ -276,7 +281,7 @@ async def advisor_cancel_queue(request: Request, body: CancelBody, background_ta
 
 # ─── PATCH /CompleteQueue ───────────────────────────────────────────────────
 @router.patch("/CompleteQueue")
-async def complete_queue(request: Request, body: CompleteBody):
+def complete_queue(request: Request, body: CompleteBody):
     """ให้อาจารย์ปิดการให้คำปรึกษาด้วยตนเอง และปลด slot ทันที."""
     try:
         payload = verify_user_token(request)
@@ -328,7 +333,7 @@ async def complete_queue(request: Request, body: CompleteBody):
 
 # ─── POST /SyncAdvisorSlots ───────────────────────────────────────────────────
 @router.post("/SyncAdvisorSlots")
-async def sync_advisor_slots(request: Request):
+def sync_advisor_slots(request: Request):
     try:
         payload      = verify_user_token(request)
         advisor_id   = get_user_id(payload)

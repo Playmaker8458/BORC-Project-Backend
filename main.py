@@ -51,7 +51,8 @@ async def booking_status_worker():
     while True:
         try:
             client = Connect_MongoDB()  # shared singleton (common/mongodb_atlas.py) — ห้าม close()
-            auto_update_status(client["BORC"])
+            # sync pymongo: รันใน thread เพื่อไม่บล็อก event loop ของทุก request
+            await asyncio.to_thread(auto_update_status, client["BORC"])
         except Exception:
             logging.exception("booking status worker failed")
         await asyncio.sleep(30)
