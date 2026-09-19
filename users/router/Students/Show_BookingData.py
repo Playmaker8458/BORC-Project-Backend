@@ -3,6 +3,7 @@ import logging
 from fastapi import APIRouter, HTTPException, Request, Depends
 from ...Database.ConnectDB import Connect_MongoDB
 from ...auth.authUser import verify_user_token, get_user_id
+from common.parallel import run_parallel
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -56,17 +57,19 @@ def Get_Booking_Stats(payload: dict = Depends(verify_user_token)):
 
         db = Connect_MongoDB()["BORC"]
 
-        # ✅ อ้างอิง rescheduledById + rescheduledByRole="Student" เท่านั้น
-        total_rescheduled = db["RescheduleHistory"].count_documents({
-            "rescheduledById" : user_id,
-            "rescheduledByRole": "Student",
-        })
-
-        # ✅ อ้างอิง cancelledById + cancelledByRole="Student" เท่านั้น
-        total_cancelled = db["CancelBookingHistory"].count_documents({
-            "cancelledById"  : user_id,
-            "cancelledByRole": "Student",
-        })
+        # 2 count อิสระต่อกัน -> query พร้อมกัน
+        # ✅ reschedule: อ้างอิง rescheduledById + rescheduledByRole="Student" เท่านั้น
+        # ✅ cancel    : อ้างอิง cancelledById + cancelledByRole="Student" เท่านั้น
+        total_rescheduled, total_cancelled = run_parallel(
+            lambda: db["RescheduleHistory"].count_documents({
+                "rescheduledById" : user_id,
+                "rescheduledByRole": "Student",
+            }),
+            lambda: db["CancelBookingHistory"].count_documents({
+                "cancelledById"  : user_id,
+                "cancelledByRole": "Student",
+            }),
+        )
 
         return {
             "stats": {

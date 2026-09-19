@@ -4,6 +4,7 @@ logger = logging.getLogger(__name__)
 from fastapi import APIRouter, HTTPException, Request
 from ...Database.ConnectDB import Connect_MongoDB
 from users.auth.authUser import verify_user_token, get_user_id
+from common.parallel import run_parallel
 
 router = APIRouter()
 
@@ -58,42 +59,33 @@ def Get_Advisor_Stats(request: Request):
         db = Connect_MongoDB()["BORC"]
 
 
-        total_approved = db["ApprovedHistory"].count_documents({
-            "AdvisorId": advisor_id,
-            "Status"   : "Approved"
-        })
-
-        advisor_doc = db["UserProfile"].find_one(
-            {"userId": advisor_id},
-            {"_id": 0, "Prefix": 1, "Firstname": 1, "Lastname": 1}
+        # ชื่ออาจารย์ใช้ค่าที่ verify_user_token ตรวจแล้ว (สูตรเดียวกับเดิม) ไม่ต้องค้น UserProfile ซ้ำ
+        advisor_name = (
+            f"{payload.get('Prefix', '')}"
+            f"{payload.get('Firstname', '')} "
+            f"{payload.get('Lastname', '')}".strip()
         )
-        advisor_name = ""
-        if advisor_doc:
-            advisor_name = (
-                f"{advisor_doc.get('Prefix','')}"
-                f"{advisor_doc.get('Firstname','')} "
-                f"{advisor_doc.get('Lastname','')}".strip()
-            )
 
-        # ✅ นับการเลื่อนคิวทั้งหมดของอาจารย์คนนี้ ไม่ว่าใครเป็นคนกดเลื่อน (อาจารย์หรือนักศึกษา)
-        #    เดิม filter เฉพาะ rescheduledById+rescheduledByRole="Advisor" ทำให้ไม่นับกรณี
-        #    นักศึกษาเป็นคนเลื่อนคิวเอง — ทั้งสองฝั่งบันทึก advisorName ไว้เสมอ จึงใช้ field
-        #    นี้จับคู่แทน (RescheduleHistory ไม่มี advisorId เก็บไว้)
-        total_rescheduled = db["RescheduleHistory"].count_documents({
-            "advisorName": advisor_name,
-        })
-
-        # ✅ นับการยกเลิกคิวทั้งหมดของอาจารย์คนนี้ ไม่ว่าใครเป็นคนกดยกเลิก
-        #    เดิม filter เฉพาะ cancelledByRole="Advisor" ทำให้ไม่นับกรณีนักศึกษายกเลิกคิวเอง
-        total_cancelled = db["CancelBookingHistory"].count_documents({
-            "advisorName": advisor_name,
-        })
-
-        # ✅ นับจำนวนที่ปิดการให้คำปรึกษาแล้ว (ทั้งอาจารย์กดปิดเองและระบบปิดอัตโนมัติ)
-        total_completed = db["QueueManagementHistory"].count_documents({
-            "userId": advisor_id,
-            "status": "Completed",
-        })
+        # 4 count อิสระต่อกัน -> query พร้อมกัน (รอ DB รอบเดียวแทน 5 รอบ)
+        total_approved, total_rescheduled, total_cancelled, total_completed = run_parallel(
+            lambda: db["ApprovedHistory"].count_documents({
+                "AdvisorId": advisor_id,
+                "Status"   : "Approved"
+            }),
+            # ✅ นับการเลื่อนคิวทั้งหมดของอาจารย์คนนี้ ไม่ว่าใครเป็นคนกดเลื่อน (อาจารย์หรือนักศึกษา)
+            #    เดิม filter เฉพาะ rescheduledById+rescheduledByRole="Advisor" ทำให้ไม่นับกรณี
+            #    นักศึกษาเป็นคนเลื่อนคิวเอง — ทั้งสองฝั่งบันทึก advisorName ไว้เสมอ จึงใช้ field
+            #    นี้จับคู่แทน (RescheduleHistory ไม่มี advisorId เก็บไว้)
+            lambda: db["RescheduleHistory"].count_documents({"advisorName": advisor_name}),
+            # ✅ นับการยกเลิกคิวทั้งหมดของอาจารย์คนนี้ ไม่ว่าใครเป็นคนกดยกเลิก
+            #    (เดิม filter เฉพาะ cancelledByRole="Advisor" ทำให้ไม่นับกรณีนักศึกษายกเลิกเอง)
+            lambda: db["CancelBookingHistory"].count_documents({"advisorName": advisor_name}),
+            # ✅ นับจำนวนที่ปิดการให้คำปรึกษาแล้ว (ทั้งอาจารย์กดปิดเองและระบบปิดอัตโนมัติ)
+            lambda: db["QueueManagementHistory"].count_documents({
+                "userId": advisor_id,
+                "status": "Completed",
+            }),
+        )
 
         return {
             "stats": {

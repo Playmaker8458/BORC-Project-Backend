@@ -8,6 +8,7 @@ import cloudinary.uploader
 from fastapi import APIRouter, HTTPException, status, Depends, File, UploadFile
 from pydantic import BaseModel
 from ..Database.ConnectDB import Connect_MongoDB
+from common.user_cache import invalidate_user_cache
 from datetime import datetime, timezone
 from users.auth.authUser import verify_user_token
 
@@ -57,6 +58,8 @@ def update_UserNameDB(user_id: str, prefix: str, firstname: str, lastname: str) 
             }
         )
         
+        invalidate_user_cache(user_id)  # ชื่อใหม่ต้องมีผลทันที ไม่รอ cache หมดอายุ
+
         # 3. Cascade updates to sync names across related collections
         # ใช้ matched_count เพื่อ sync ข้อมูลที่อาจค้างจากการแก้ไขก่อนหน้าได้ด้วย
         if result.matched_count > 0:
@@ -95,6 +98,7 @@ def update_UserImageDB(user_id: str, image_url: str) -> bool:
                 }
             }
         )
+        invalidate_user_cache(user_id)
         return result.matched_count > 0
     except Exception as e:
         logger.exception("เกิดข้อผิดพลาดในการอัพเดตรูปภาพ: %s", e)

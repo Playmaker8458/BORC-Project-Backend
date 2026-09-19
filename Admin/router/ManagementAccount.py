@@ -3,6 +3,7 @@ import logging
 logger = logging.getLogger(__name__)
 from fastapi import APIRouter, HTTPException
 from Admin.Database.ConnectDB import Connect_MongoDB
+from common.user_cache import invalidate_user_cache
 from bson import ObjectId
 from pydantic import BaseModel
 from datetime import datetime, timezone
@@ -79,6 +80,7 @@ def Delete_AccountUser(client, user_id: str):
         deleted_booking = col_booking.delete_many({"UserId": booking_user_id})
         deleted_queue   = col_queue.delete_many({"UserId": booking_user_id})
         deleted_profile = col_profile.delete_one({"_id": object_id})
+        invalidate_user_cache(booking_user_id)
 
         # ✅ ใช้ role จริงจาก DB ("Student")
         _save_history(col_history, first_name, last_name, role=role, status_label="ลบบัญชีแล้ว")
@@ -100,6 +102,7 @@ def Delete_AccountUser(client, user_id: str):
         deleted_booking  = col_booking.delete_many({"Advisor_Name": advisor_name})
         deleted_timeslot = col_timeslot.delete_many({"advisor_name": advisor_name})
         deleted_profile  = col_profile.delete_one({"_id": object_id})
+        invalidate_user_cache(booking_user_id)
 
         # ✅ ใช้ role จริงจาก DB ("Advisor")
         _save_history(col_history, first_name, last_name, role=role, status_label="ลบบัญชีแล้ว")
@@ -152,6 +155,8 @@ def Update_AccountUser(client, body: UpdateUserRequest):
             "Department": body.Department,  
         }}
     )
+
+    invalidate_user_cache(booking_uid)  # สิทธิ์/สถานะ/ชื่อใหม่ต้องมีผลทันที ไม่รอ cache หมดอายุ
 
     # ---- 2) อัปเดต Collection ที่เกี่ยวข้อง ----
     if body.Role == "Student":

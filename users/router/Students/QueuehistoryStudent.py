@@ -4,6 +4,7 @@ logger = logging.getLogger(__name__)
 from fastapi import APIRouter, HTTPException, Request
 from ...Database.ConnectDB import Connect_MongoDB
 from users.auth.authUser import get_current_student
+from common.parallel import run_parallel
 from datetime import datetime, timezone, timedelta
 
 router = APIRouter()
@@ -33,7 +34,21 @@ def get_all_queue_history(request: Request):
 
         history: list[dict] = []
 
-        for doc in db["ApprovedHistory"].find({"UserId": user_id}):
+        # 4 collection อิสระต่อกัน -> query พร้อมกัน (รอ DB รอบเดียวแทน 4 รอบ)
+        # แล้วต่อผลตามลำดับเดิม (Approved, Reschedule, Cancel, Completed) เพื่อให้ลำดับตอน
+        # createdAt เท่ากันเหมือนเดิม
+        approved_docs, reschedule_docs, cancel_docs, completed_docs = run_parallel(
+            lambda: list(db["ApprovedHistory"].find({"UserId": user_id})),
+            lambda: list(db["RescheduleHistory"].find(
+                {"$or": [{"rescheduledById": user_id}, {"studentId": user_id}]}
+            )),
+            lambda: list(db["CancelBookingHistory"].find({"cancelledById": user_id})),
+            lambda: list(db["QueueManagementHistory"].find(
+                {"userId": user_id, "status": "Completed"}, {"_id": 0}
+            )),
+        )
+
+        for doc in approved_docs:
             history.append({
                 "UserName" : doc.get("AdvisorName", ""),
                 "role"     : "Advisor",
@@ -43,9 +58,7 @@ def get_all_queue_history(request: Request):
                 "updatedAt": doc.get("UpdatedAt"),
             })
 
-        for doc in db["RescheduleHistory"].find(
-            {"$or": [{"rescheduledById": user_id}, {"studentId": user_id}]}
-        ):
+        for doc in reschedule_docs:
             history.append({
                 "UserName" : doc.get("advisorName", ""),
                 "role"     : doc.get("rescheduledByRole", ""),
@@ -55,7 +68,7 @@ def get_all_queue_history(request: Request):
                 "updatedAt": doc.get("updatedAt"),
             })
 
-        for doc in db["CancelBookingHistory"].find({"cancelledById": user_id}):
+        for doc in cancel_docs:
             history.append({
                 "UserName" : doc.get("advisorName", ""),
                 "role"     : doc.get("cancelledByRole", ""),
@@ -65,9 +78,7 @@ def get_all_queue_history(request: Request):
                 "updatedAt": doc.get("updatedAt"),
             })
 
-        for doc in db["QueueManagementHistory"].find(
-            {"userId": user_id, "status": "Completed"}, {"_id": 0}
-        ):
+        for doc in completed_docs:
             history.append({
                 "UserName" : doc.get("UserName", ""),
                 "role"     : doc.get("role", ""),

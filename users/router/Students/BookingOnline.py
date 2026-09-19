@@ -89,6 +89,10 @@ def ensure_booking_indexes(db):
     db["ApprovedHistory"].create_index([("UserId", ASCENDING)])
     db["CancelBookingHistory"].create_index([("cancelledById", ASCENDING)])
     db["QueueManagementHistory"].create_index([("userId", ASCENDING), ("status", ASCENDING)])
+    # AdvisorStats นับด้วย AdvisorId / advisorName
+    db["ApprovedHistory"].create_index([("AdvisorId", ASCENDING), ("Status", ASCENDING)])
+    db["RescheduleHistory"].create_index([("advisorName", ASCENDING)])
+    db["CancelBookingHistory"].create_index([("advisorName", ASCENDING)])
 
     lock_col = db["_AutoUpdateLock"]
     

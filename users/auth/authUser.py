@@ -1,4 +1,3 @@
-import time
 import logging
 import os
 from datetime import datetime, timedelta, timezone
@@ -10,6 +9,7 @@ from pydantic import BaseModel
 
 from users.Database.ConnectDB import Connect_MongoDB
 from common.jwt_utils import encode_token, decode_token, JWTError
+from common.user_cache import cache_get, cache_put, invalidate_user_cache  # noqa: F401  (re-export)
 from common.rate_limit import limit
 
 logger = logging.getLogger(__name__)
@@ -243,35 +243,18 @@ def set_user_session(request: Request, response: Response, token: str):
 
 
 # ============================================================
-# Short-lived cache for per-request user lookup
+# Short-lived cache for per-request user lookup (ดู common/user_cache.py)
 # ============================================================
-# verify_user_token ทำงานทุก request; เดิมยิง MongoDB Atlas 1 รอบต่อ request (ข้ามเครือข่าย
-# Railway -> Atlas) ตอนนี้ cache ผลไว้สั้น ๆ เพื่อลด round trip ผลข้างเคียง: การเปลี่ยน
-# Role/Status ของผู้ใช้จะมีผลภายใน _USER_CACHE_TTL_SEC วินาที
-_USER_CACHE_TTL_SEC = 15
-_USER_CACHE_MAX = 2048
-_user_cache: dict[str, tuple[float, dict | None]] = {}
-
 
 def _get_user_cached(user_id: str) -> dict | None:
-    now = time.monotonic()
-    hit = _user_cache.get(user_id)
-    if hit and now - hit[0] < _USER_CACHE_TTL_SEC:
-        return hit[1]
+    user = cache_get(user_id)
+    if user is not None:
+        return user
     user = get_UserDB(user_id)
     # cache เฉพาะบัญชีที่อนุมัติแล้ว: ผู้ใช้ที่เพิ่งได้รับอนุมัติต้องเข้าใช้งานได้ทันที
     if user and user.get("Status") == ACTIVE_STATUS:
-        if len(_user_cache) >= _USER_CACHE_MAX:
-            _user_cache.clear()
-        _user_cache[user_id] = (now, user)
+        cache_put(user_id, user)
     return user
-
-
-def invalidate_user_cache(user_id: str | None = None) -> None:
-    if user_id is None:
-        _user_cache.clear()
-    else:
-        _user_cache.pop(user_id, None)
 
 
 # ============================================================
@@ -650,25 +633,18 @@ def get_NavbarUsers(payload: dict = Depends(verify_user_token), response: Respon
 def Student_dashboard(payload: dict = Depends(verify_user_token)):
     """
     Dashboard สำหรับ Student
+    (ใช้ข้อมูลที่ verify_user_token ตรวจแล้ว ไม่ต้องค้น UserProfile ซ้ำ)
     """
 
-    db_user = get_UserDB(payload["user_id"])
-
-    if not db_user:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="ไม่พบข้อมูลผู้ใช้",
-        )
-
-    if db_user["Role"] != "Student":
+    if payload["role"] != "Student":
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="เฉพาะนักศึกษาเท่านั้น",
         )
 
     return {
-        "message": f"{db_user['Prefix']}{db_user['Firstname']} {db_user['Lastname']}",
-        "role": db_user["Role"],
+        "message": f"{payload['Prefix']}{payload['Firstname']} {payload['Lastname']}",
+        "role": payload["role"],
     }
 
 
@@ -680,25 +656,18 @@ def Student_dashboard(payload: dict = Depends(verify_user_token)):
 def Advisor_dashboard(payload: dict = Depends(verify_user_token)):
     """
     Dashboard สำหรับ Advisor
+    (ใช้ข้อมูลที่ verify_user_token ตรวจแล้ว ไม่ต้องค้น UserProfile ซ้ำ)
     """
 
-    db_user = get_UserDB(payload["user_id"])
-
-    if not db_user:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="ไม่พบข้อมูลผู้ใช้",
-        )
-
-    if db_user["Role"] != "Advisor":
+    if payload["role"] != "Advisor":
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="เฉพาะอาจารย์เท่านั้น",
         )
 
     return {
-        "message": f"{db_user['Prefix']}{db_user['Firstname']} {db_user['Lastname']}",
-        "role": db_user["Role"],
+        "message": f"{payload['Prefix']}{payload['Firstname']} {payload['Lastname']}",
+        "role": payload["role"],
     }
 
 
@@ -710,22 +679,15 @@ def Advisor_dashboard(payload: dict = Depends(verify_user_token)):
 def get_Me(payload: dict = Depends(verify_user_token)):
     """
     ตรวจสอบว่า User ยัง Login อยู่หรือไม่
+    (ใช้ข้อมูลที่ verify_user_token ตรวจแล้ว ไม่ต้องค้น UserProfile ซ้ำ)
     """
 
-    db_user = get_UserDB(payload["user_id"])
-
-    if not db_user:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="ไม่พบข้อมูลผู้ใช้",
-        )
-
     return {
-        "user_id": db_user["userId"],
-        "role": db_user["Role"],
-        "status": db_user.get("Status", ""),
-        "Prefix": db_user.get("Prefix", ""),
-        "Firstname": db_user.get("Firstname", ""),
-        "Lastname": db_user.get("Lastname", ""),
-        "ImageUrl": db_user.get("imageURL", ""),
+        "user_id": payload["user_id"],
+        "role": payload["role"],
+        "status": payload.get("Status", ""),
+        "Prefix": payload.get("Prefix", ""),
+        "Firstname": payload.get("Firstname", ""),
+        "Lastname": payload.get("Lastname", ""),
+        "ImageUrl": payload.get("imageURL", ""),
     }

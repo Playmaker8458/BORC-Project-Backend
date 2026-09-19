@@ -5,6 +5,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from datetime import datetime, timezone
 from Admin.Database.ConnectDB import Connect_MongoDB
+from common.user_cache import invalidate_user_cache
 import requests as req  # ✅ เพิ่ม import
 from dotenv import load_dotenv
 import os
@@ -86,6 +87,7 @@ def update_role_user(user_id: str, update: UpdateDataUser):
                 "Status": update.Status,
             }}
         )
+        invalidate_user_cache(user_id)  # สิทธิ์/สถานะใหม่ต้องมีผลทันที ไม่รอ cache หมดอายุ
             
         save_history(
             col_history,
@@ -135,6 +137,7 @@ def delete_user(user_id: str):
 
         # ── ลบจาก UserProfile ─────────────────────────────────────────────
         col.delete_one({"userId": user_id})
+        invalidate_user_cache(user_id)
 
         # ── บันทึก History ────────────────────────────────────────────────
         save_history(

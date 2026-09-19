@@ -42,3 +42,14 @@ def _reset_rate_limiter():
     if limiter is not None:
         limiter.reset()
     yield
+
+
+@pytest.fixture(autouse=True)
+def _reset_user_cache():
+    """verify_user_token cache ข้อมูลผู้ใช้ไว้ในหน่วยความจำ (ข้าม request) — ล้างก่อน/หลังทุกเทส
+    ไม่ให้ผู้ใช้ชื่อเดียวกันจากเทสก่อนหน้า (คนละ mongomock) รั่วมาเป็นผลของเทสถัดไป"""
+    from users.auth import authUser
+
+    authUser.invalidate_user_cache()
+    yield
+    authUser.invalidate_user_cache()
