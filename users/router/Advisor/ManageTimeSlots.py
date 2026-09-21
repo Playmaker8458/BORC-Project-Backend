@@ -15,6 +15,9 @@ from common.slot_service import get_today_str
 
 router = APIRouter()
 
+# จำนวนช่วงเวลาสูงสุดที่อาจารย์ตั้งได้ต่อวัน (ต้องตรงกับ MAX_SLOTS_PER_DAY ฝั่ง frontend)
+MAX_SLOTS_PER_DAY = 3
+
 # ─────────────────────────────────────────
 # Models
 # ─────────────────────────────────────────
@@ -145,6 +148,15 @@ def check_overlap(slots: list) -> bool:
     ซึ่ง TimeSlot ยังไม่ได้ห้ามไว้) จำนวน slot ต่อวันน้อย ต้นทุนการเทียบทุกคู่จึงเล็กน้อย"""
     times = [t for t in map(_to_minutes, slots) if t is not None]
     return any(_conflicts(a, b) for a, b in combinations(times, 2))
+
+
+def _raise_if_too_many_slots(date: str, count: int) -> None:
+    """raise 400 ถ้าจำนวนช่วงเวลาของวันนั้นเกิน MAX_SLOTS_PER_DAY"""
+    if count > MAX_SLOTS_PER_DAY:
+        raise HTTPException(
+            status_code=400,
+            detail=f"วันที่ {date} ตั้งช่วงเวลาได้ไม่เกิน {MAX_SLOTS_PER_DAY} ช่วงต่อวัน"
+        )
 
 
 def compute_is_locked(booked: int, current_locked: bool) -> bool:
@@ -419,6 +431,8 @@ def _merge_day_slots(date: str, existing_slots: list, incoming: list) -> list:
             detail=f"วันที่ {date} มีช่วงเวลาซ้อนกับช่วงเวลาที่มีอยู่แล้ว"
         )
 
+    _raise_if_too_many_slots(date, len(kept_slots) + len(incoming_times))
+
     new_slots = [_preserving_slot(s.start, s.end, existing_map.get((s.start, s.end))) for s in incoming]
     return sorted(kept_slots + new_slots, key=lambda s: s["start"])
 
@@ -503,6 +517,8 @@ def copy_to_all_days(data: CopyToAllDaysRequest, request: Request):
 
         if check_overlap([{"start": s.start, "end": s.end} for s in data.slots]):
             raise HTTPException(status_code=400, detail="ช่วงเวลาที่ระบุซ้อนกัน")
+
+        _raise_if_too_many_slots(data.target_month, len({(s.start, s.end) for s in data.slots}))
 
         payload          = get_current_advisor(request)
         today            = get_today_utc7()
