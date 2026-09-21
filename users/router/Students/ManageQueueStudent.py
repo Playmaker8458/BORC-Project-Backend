@@ -4,7 +4,7 @@ logger = logging.getLogger(__name__)
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from ...Database.ConnectDB import Connect_MongoDB
 from ...auth.authUser import verify_user_token, get_user_id
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pydantic import BaseModel
 from ..Students.BookingOnline import auto_update_status, recalculate_slot_booked as sync_slot_booking
 from dotenv import load_dotenv
@@ -19,8 +19,12 @@ load_dotenv(override=True)
 chatbot_uri = CHATBOT_URL
 
 ACTIVE_STATUSES        = ["Pending", "Approved", "Rescheduled", "InProgress"]
-CANCELLABLE_STATUSES   = ["Pending"]
+CANCELLABLE_STATUSES   = ["Pending", "Approved", "Rescheduled"]
 SLOT_BLOCKING_STATUSES = ["Pending", "Approved"]  # ✅ เพิ่มกลับ
+
+# นักศึกษายกเลิกคิวได้ไม่เกินกี่ครั้งต่อวัน (นับตามวันปฏิทิน UTC+7) กัน "จอง-ยกเลิก" ซ้ำๆ
+MAX_CANCELS_PER_DAY = 2
+_TZ_UTC7 = timezone(timedelta(hours=7))
 
 CUTOFF_HOURS_BEFORE = 1
 CUTOFF_HOURS_AFTER  = 1
@@ -28,6 +32,16 @@ CUTOFF_HOURS_AFTER  = 1
 
 class CancelBookingRequest(BaseModel):
     cancelReason: str = ""
+
+
+def count_student_cancels_today(db, user_id: str) -> int:
+    """จำนวนครั้งที่นักศึกษายกเลิกคิวเองในวันนี้ (ตามเวลาไทย)"""
+    start_utc7 = datetime.now(_TZ_UTC7).replace(hour=0, minute=0, second=0, microsecond=0)
+    return db["CancelBookingHistory"].count_documents({
+        "cancelledById"  : user_id,
+        "cancelledByRole": "Student",
+        "createdAt"      : {"$gte": start_utc7.astimezone(timezone.utc)},
+    })
 
 
 # ─── Cutoff helper ────────────────────────────────────────────────────────────
@@ -72,6 +86,7 @@ def get_my_booking_detail(request: Request):
                 "ResearchDetail" : booking.get("ResearchDetail", ""),
                 "Status"         : booking.get("Status", ""),
                 "RescheduledOnce": booking.get("RescheduledOnce", False),
+                "CancelLimitReached": count_student_cancels_today(db, user_id) >= MAX_CANCELS_PER_DAY,
             }
         }
 
@@ -175,6 +190,12 @@ def cancel_booking(request: Request, body: CancelBookingRequest, background_task
             raise HTTPException(
                 status_code=400,
                 detail=f"ไม่สามารถยกเลิกได้ เนื่องจากสถานะปัจจุบันคือ '{booking['Status']}'"
+            )
+
+        if count_student_cancels_today(db, user_id) >= MAX_CANCELS_PER_DAY:
+            raise HTTPException(
+                status_code=400,
+                detail=f"ยกเลิกคิวได้ไม่เกิน {MAX_CANCELS_PER_DAY} ครั้งต่อวัน วันนี้คุณยกเลิกครบแล้ว"
             )
 
         advisor_name = booking.get("Advisor_Name", "")
