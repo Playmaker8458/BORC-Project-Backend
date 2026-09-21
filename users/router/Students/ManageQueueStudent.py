@@ -6,10 +6,11 @@ from ...Database.ConnectDB import Connect_MongoDB
 from ...auth.authUser import verify_user_token, get_user_id
 from datetime import datetime, timezone
 from pydantic import BaseModel
-from ..Students.BookingOnline import auto_update_status, recalculate_slot_booked as sync_slot_booking
+from ..Students.BookingOnline import auto_update_status
 from dotenv import load_dotenv
 from common.notify import CHATBOT_INTERNAL_HEADERS, CHATBOT_URL, notify_chatbot
-from common.slot_service import is_within_advisor_cutoff_window
+from common.slot_service import cancel_booking_and_sync_slot, is_within_advisor_cutoff_window, split_time_range
+from common.parallel import run_parallel
 from common.queue_history import log_queue_management_history
 
 
@@ -180,9 +181,7 @@ def cancel_booking(request: Request, body: CancelBookingRequest, background_task
         advisor_name = booking.get("Advisor_Name", "")
         date         = booking.get("Date", "")
         time_str     = booking.get("Time", "")
-        time_parts   = time_str.split("-") if time_str else []
-        start        = time_parts[0].strip() if len(time_parts) == 2 else ""
-        end          = time_parts[1].strip() if len(time_parts) == 2 else ""
+        start, _     = split_time_range(time_str)
 
         if start and is_within_cutoff(date, start):
             raise HTTPException(
@@ -192,38 +191,31 @@ def cancel_booking(request: Request, body: CancelBookingRequest, background_task
 
         now = datetime.now(timezone.utc)
 
-        col_booking.update_one(
-            {"_id": booking["_id"]},
-            {"$set": {
-                "Status": "Cancelled", 
-                "CancelReason": body.cancelReason.strip(),
-                "UpdatedAt": now
-            }}
-        )
-
-        if booking.get("AdvisorId") and date and start and end:
-            sync_slot_booking(db, booking["AdvisorId"], date, start, end)
-
-        db["CancelBookingHistory"].insert_one({
-            "cancelledById"  : user_id,
-            "cancelledByRole": "Student",
-            "advisorName"    : advisor_name,
-            "studentName"    : booking.get("StudentName", ""),
-            "status"         : "Cancelled",
-            "cancelReason"   : body.cancelReason.strip(),
-            "createdAt"      : now,
-            "updatedAt"      : now,
-        })
-
-        log_queue_management_history(
-            db,
-            advisor_id=booking.get("AdvisorId", ""),
-            advisor_name=advisor_name,
-            student_id=user_id,
-            student_name=booking.get("StudentName", ""),
-            status="Cancelled",
-            reason=body.cancelReason.strip(),
-            now=now,
+        # ชุดต่อกัน (cancel → sync slot) กับ history 2 รายการ ไม่พึ่งกัน จึงรันพร้อมกัน
+        run_parallel(
+            lambda: cancel_booking_and_sync_slot(
+                db, booking, now, {"CancelReason": body.cancelReason.strip()}
+            ),
+            lambda: db["CancelBookingHistory"].insert_one({
+                "cancelledById"  : user_id,
+                "cancelledByRole": "Student",
+                "advisorName"    : advisor_name,
+                "studentName"    : booking.get("StudentName", ""),
+                "status"         : "Cancelled",
+                "cancelReason"   : body.cancelReason.strip(),
+                "createdAt"      : now,
+                "updatedAt"      : now,
+            }),
+            lambda: log_queue_management_history(
+                db,
+                advisor_id=booking.get("AdvisorId", ""),
+                advisor_name=advisor_name,
+                student_id=user_id,
+                student_name=booking.get("StudentName", ""),
+                status="Cancelled",
+                reason=body.cancelReason.strip(),
+                now=now,
+            ),
         )
 
         # ดึง AdvisorId จาก booking เพื่อใช้ส่งการแจ้งเตือน

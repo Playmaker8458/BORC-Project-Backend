@@ -256,7 +256,7 @@ def get_reschedule_available_dates(db, advisor_id: str) -> dict:
 
 def split_time_range(time_str: str) -> tuple[str, str]:
     """"09:00-10:00" -> ("09:00", "10:00"); รูปแบบไม่ถูกต้อง -> ("", "")"""
-    parts = [t.strip() for t in time_str.split("-")] if "-" in time_str else []
+    parts = [t.strip() for t in time_str.split("-")] if time_str and "-" in time_str else []
     if len(parts) == 2:
         return parts[0], parts[1]
     return "", ""
@@ -315,3 +315,20 @@ def move_booking_to_slot(
         update_slot(db, advisor_id, booking.get("Date", ""), old_start, old_end, action="release")
     if advisor_id:
         update_slot(db, advisor_id, new_date, new_start, new_end, action="book")
+
+
+def cancel_booking_and_sync_slot(db, booking: dict, now: datetime, extra_fields: dict | None = None) -> None:
+    """เปลี่ยนสถานะ booking เป็น Cancelled แล้ว sync slot ให้ว่าง
+
+    สองขั้นนี้ต้องต่อกัน (recalculate_slot_booked นับ booking จริงจากสถานะ) ส่วน history ต่างๆ
+    ไม่พึ่งผลของขั้นนี้ จึงให้ผู้เรียกรันพร้อมกันด้วย run_parallel
+    extra_fields = ฟิลด์เสริมที่ต้อง $set ตอนยกเลิก (เช่น CancelReason ของนักศึกษา)
+    """
+    db["BookingOnline"].update_one(
+        {"_id": booking["_id"]},
+        {"$set": {"Status": "Cancelled", "UpdatedAt": now, **(extra_fields or {})}},
+    )
+    start, end = split_time_range(booking.get("Time", ""))
+    date       = booking.get("Date", "")
+    if booking.get("AdvisorId") and date and start and end:
+        recalculate_slot_booked(db, booking["AdvisorId"], date, start, end)

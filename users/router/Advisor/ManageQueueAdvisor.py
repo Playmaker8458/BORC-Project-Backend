@@ -8,8 +8,9 @@ from datetime import datetime, timezone
 from pydantic import BaseModel
 from dotenv import load_dotenv
 from ..Students.BookingOnline import auto_update_status, recalculate_slot_booked as sync_slot_booking
-from common.slot_service import is_within_advisor_cutoff_window, can_cancel_approved
+from common.slot_service import cancel_booking_and_sync_slot, can_cancel_approved, is_within_advisor_cutoff_window, split_time_range
 from common.notify import CHATBOT_INTERNAL_HEADERS, CHATBOT_URL, notify_chatbot
+from common.parallel import run_parallel
 from common.queue_history import log_queue_management_history
 
 router = APIRouter()
@@ -39,6 +40,13 @@ class CompleteBody(BaseModel):
 
 
 
+# ฟิลด์ของ booking ที่หน้าจัดการคิวของอาจารย์ใช้จริง (ไม่ส่งรายละเอียดงานวิจัย/ไฟล์แนบ ฯลฯ ให้เปลืองข้อมูล)
+ADVISOR_QUEUE_FIELDS = {
+    "UserId": 1, "AdvisorId": 1, "StudentName": 1, "ResearchTopic": 1,
+    "Date": 1, "Time": 1, "Status": 1, "RescheduledOnce": 1,
+}
+
+
 # ─── GET /AdvisorQueues ───────────────────────────────────────────────────────
 @router.get("/AdvisorQueues")
 def get_advisor_queues(request: Request):
@@ -49,32 +57,30 @@ def get_advisor_queues(request: Request):
 
         db = Connect_MongoDB()["BORC"]
 
-        bookings = list(
-            db["BookingOnline"].find(
-                {"AdvisorId": advisor_id, "Status": {"$in": ACTIVE_STATUSES}}
-            ).sort("Date", 1)
+        # ดึงคิวกับประวัติเลื่อนคิวของอาจารย์พร้อมกัน (รอ DB รอบเดียว) แล้วจับคู่กันในหน่วยความจำ
+        # (เดิมเป็น count_documents ต่อคิว = N+1 ข้ามเครือข่ายไป Atlas)
+        bookings, rescheduled_docs = run_parallel(
+            lambda: list(
+                db["BookingOnline"].find(
+                    {"AdvisorId": advisor_id, "Status": {"$in": ACTIVE_STATUSES}},
+                    ADVISOR_QUEUE_FIELDS,
+                ).sort("Date", 1)
+            ),
+            lambda: list(
+                db["RescheduleHistory"].find(
+                    {"rescheduledById": advisor_id, "rescheduledByRole": "Advisor"},
+                    {"bookingId": 1, "_id": 0},
+                )
+            ),
         )
-
-        # query เดียวแทน count_documents ต่อคิว (เดิม N+1 ข้ามเครือข่ายไป Atlas)
-        rescheduled_ids = {
-            h["bookingId"]
-            for h in db["RescheduleHistory"].find(
-                {
-                    "rescheduledById"  : advisor_id,
-                    "rescheduledByRole": "Advisor",
-                    "bookingId"        : {"$in": [str(b["_id"]) for b in bookings]},
-                },
-                {"bookingId": 1, "_id": 0},
-            )
-        }
+        rescheduled_ids = {h["bookingId"] for h in rescheduled_docs}
 
         result = []
         for b in bookings:
             booking_id           = str(b["_id"])
             b["has_rescheduled"] = booking_id in rescheduled_ids
 
-            time_parts = b.get("Time", "").split("-")
-            start_time = time_parts[0].strip() if len(time_parts) == 2 else ""
+            start_time, _ = split_time_range(b.get("Time", ""))
             b["can_cancel_approved"] = (
                 can_cancel_approved(b.get("Date", ""), start_time)
                 if b["Status"] == "Approved" and start_time
@@ -118,16 +124,6 @@ def confirm_queue(request: Request, body: ConfirmBody, background_tasks: Backgro
 
         now = datetime.now(timezone.utc)
 
-        col.update_one(
-            {"_id": booking["_id"]},
-            {"$set": {
-                "Status"                : "Approved",
-                "AdvisorRescheduledOnce": False,
-                "UpdatedAt"             : now,
-            }}
-        )
-
-
         # ✅ แจ้งเตือนนักศึกษา สีเขียว (background — ไม่บล็อก event loop)
         background_tasks.add_task(
             notify_chatbot,
@@ -142,30 +138,39 @@ def confirm_queue(request: Request, body: ConfirmBody, background_tasks: Backgro
             },
             CHATBOT_INTERNAL_HEADERS,
         )
-            
-        db["ApprovedHistory"].insert_one({
-            "UserId"      : booking["UserId"],
-            "StudentName" : booking.get("StudentName", ""),
-            "AdvisorId"   : booking.get("AdvisorId", ""),
-            "AdvisorName" : booking.get("Advisor_Name", ""),
-            "Date"        : booking.get("Date", ""),
-            "Time"        : booking.get("Time", ""),
-            "Status"      : "Approved",
-            "ApprovedFrom": booking.get("Status", ""),
-            "CreatedAt"   : now,
-            "UpdatedAt"   : now,
-        })
 
-
-        log_queue_management_history(
-            db,
-            advisor_id=booking.get("AdvisorId", ""),
-            advisor_name=booking.get("Advisor_Name", ""),
-            student_id=booking.get("UserId", ""),
-            student_name=booking.get("StudentName", ""),
-            status="Approved",
-            reason=None,
-            now=now,
+        # 3 คำสั่งเขียนนี้ไม่พึ่งผลของกัน จึงรันพร้อมกัน (รอ DB รอบเดียวแทน 3 รอบต่อกัน)
+        run_parallel(
+            lambda: col.update_one(
+                {"_id": booking["_id"]},
+                {"$set": {
+                    "Status"                : "Approved",
+                    "AdvisorRescheduledOnce": False,
+                    "UpdatedAt"             : now,
+                }}
+            ),
+            lambda: db["ApprovedHistory"].insert_one({
+                "UserId"      : booking["UserId"],
+                "StudentName" : booking.get("StudentName", ""),
+                "AdvisorId"   : booking.get("AdvisorId", ""),
+                "AdvisorName" : booking.get("Advisor_Name", ""),
+                "Date"        : booking.get("Date", ""),
+                "Time"        : booking.get("Time", ""),
+                "Status"      : "Approved",
+                "ApprovedFrom": booking.get("Status", ""),
+                "CreatedAt"   : now,
+                "UpdatedAt"   : now,
+            }),
+            lambda: log_queue_management_history(
+                db,
+                advisor_id=booking.get("AdvisorId", ""),
+                advisor_name=booking.get("Advisor_Name", ""),
+                student_id=booking.get("UserId", ""),
+                student_name=booking.get("StudentName", ""),
+                status="Approved",
+                reason=None,
+                now=now,
+            ),
         )
 
         return {"message": "อนุมัติคิวสำเร็จ"}
@@ -203,9 +208,7 @@ def advisor_cancel_queue(request: Request, body: CancelBody, background_tasks: B
         advisor_name = booking.get("Advisor_Name", "")
         date_str     = booking.get("Date", "")
         time_str     = booking.get("Time", "")
-        time_parts   = time_str.split("-") if time_str else []
-        start        = time_parts[0].strip() if len(time_parts) == 2 else ""
-        end          = time_parts[1].strip() if len(time_parts) == 2 else ""
+        start, _     = split_time_range(time_str)
 
         if booking["Status"] in ("Pending", "Rescheduled"):
             if start and is_within_advisor_cutoff_window(date_str, start):
@@ -222,37 +225,31 @@ def advisor_cancel_queue(request: Request, body: CancelBody, background_tasks: B
 
         now = datetime.now(timezone.utc)
 
-        col_booking.update_one(
-            {"_id": booking["_id"]},
-            {"$set": {"Status": "Cancelled", "UpdatedAt": now}}
+        # ชุดต่อกัน (cancel → sync slot) กับ history 2 รายการ ไม่พึ่งกัน จึงรันพร้อมกัน
+        run_parallel(
+            lambda: cancel_booking_and_sync_slot(db, booking, now),
+            lambda: db["CancelBookingHistory"].insert_one({
+                "cancelledById"  : booking.get("UserId", ""),
+                "cancelledByRole": "Advisor",
+                "advisorName"    : advisor_name,
+                "studentName"    : booking.get("StudentName", ""),
+                "cancelledDate"  : date_str,
+                "cancelReason"   : body.reason,
+                "status"         : "Cancelled",
+                "createdAt"      : now,
+                "updatedAt"      : now,
+            }),
+            lambda: log_queue_management_history(
+                db,
+                advisor_id=booking.get("AdvisorId", ""),
+                advisor_name=advisor_name,
+                student_id=booking.get("UserId", ""),
+                student_name=booking.get("StudentName", ""),
+                status="Cancelled",
+                reason=body.reason,
+                now=now,
+            ),
         )
-
-        db["CancelBookingHistory"].insert_one({
-            "cancelledById"  : booking.get("UserId", ""),
-            "cancelledByRole": "Advisor",
-            "advisorName"    : advisor_name,
-            "studentName"    : booking.get("StudentName", ""),
-            "cancelledDate"  : date_str,
-            "cancelReason"   : body.reason,
-            "status"         : "Cancelled",
-            "createdAt"      : now,
-            "updatedAt"      : now,
-        })
-
-
-        log_queue_management_history(
-            db,
-            advisor_id=booking.get("AdvisorId", ""),
-            advisor_name=advisor_name,
-            student_id=booking.get("UserId", ""),
-            student_name=booking.get("StudentName", ""),
-            status="Cancelled",
-            reason=body.reason,
-            now=now,
-        )
-
-        if booking.get("AdvisorId") and date_str and start and end:
-            sync_slot_booking(db, booking["AdvisorId"], date_str, start, end)
 
         # ✅ แจ้งเตือนนักศึกษา สีแดง (background — ไม่บล็อก event loop)
         background_tasks.add_task(

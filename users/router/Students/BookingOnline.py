@@ -76,6 +76,8 @@ def ensure_booking_indexes(db):
     db["UserProfile"].create_index([("userId", ASCENDING)])
     db["RescheduleHistory"].create_index([("bookingId", ASCENDING), ("rescheduledById", ASCENDING)])
     db["RescheduleHistory"].create_index([("studentId", ASCENDING)])
+    # หน้าจัดการคิวของอาจารย์ค้นประวัติเลื่อนคิวด้วย rescheduledById + rescheduledByRole (รันพร้อมกับการดึงคิว)
+    db["RescheduleHistory"].create_index([("rescheduledById", ASCENDING), ("rescheduledByRole", ASCENDING)])
     db["ApprovedHistory"].create_index([("UserId", ASCENDING)])
     db["CancelBookingHistory"].create_index([("cancelledById", ASCENDING)])
     db["QueueManagementHistory"].create_index([("userId", ASCENDING), ("status", ASCENDING)])
