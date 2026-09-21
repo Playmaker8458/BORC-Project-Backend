@@ -10,6 +10,7 @@ from starlette import status as ws_status
 from users.auth.authUser import ensure_user_role, verify_user_token, get_user_id
 from common.booking_status import CHAT_STATUSES
 from common.chat_limits import ChatInvalid, chat_rate_ok, parse_ws_text, WS_POLICY_VIOLATION
+
 # ⚠️ ปรับ path import ให้ตรงกับตำแหน่งไฟล์ advisor_chat.py จริงในโปรเจกต์
 from ..Advisor.ChatAdvisor import (
     db,

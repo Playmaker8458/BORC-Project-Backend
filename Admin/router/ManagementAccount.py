@@ -1,7 +1,8 @@
 import logging
+import re
 
 logger = logging.getLogger(__name__)
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from Admin.Database.ConnectDB import Connect_MongoDB
 from common.user_cache import invalidate_user_cache
 from common.attachments import delete_attachments
@@ -95,15 +96,31 @@ def _cancel_active_bookings_of_advisor(db, active_bookings: list, advisor_name: 
 #  Helper Functions
 # ─────────────────────────────────────────
 
-def GetData_AccountUser(client):
-    db  = client["BORC"]
-    col = db["UserProfile"]
+# สถานะที่หน้า "จัดการบัญชี" แสดง (ตรงกับ MANAGED_STATUSES ฝั่ง frontend)
+MANAGED_STATUSES = ["Approved", "Suspended"]
 
-    result = []
-    for data in col.find():
+
+def GetPage_AccountUser(client, page: int, limit: int, search: str) -> dict:
+    """ดึงบัญชีที่จัดการได้ทีละหน้า: กรองสถานะ + ค้นหา (ชื่อ/นามสกุล/บทบาท) ที่ MongoDB แล้วแบ่งหน้าด้วย skip/limit
+
+    page เกินหน้าสุดท้ายจะถูกปรับกลับมาที่หน้าสุดท้าย (เช่น ลบรายการสุดท้ายของหน้าไป)
+    """
+    col = client["BORC"]["UserProfile"]
+    query: dict = {"Status": {"$in": MANAGED_STATUSES}}
+    term = search.strip()
+    if term:
+        rx = {"$regex": re.escape(term), "$options": "i"}
+        query["$or"] = [{"Firstname": rx}, {"Lastname": rx}, {"Role": rx}]
+
+    total = col.count_documents(query)
+    last_page = max(1, -(-total // limit))
+    page = min(page, last_page)
+
+    items = []
+    for data in col.find(query).sort("_id", 1).skip((page - 1) * limit).limit(limit):
         data["_id"] = str(data["_id"])
-        result.append(data)
-    return result
+        items.append(data)
+    return {"items": items, "total": total, "page": page, "limit": limit}
 
 
 def Delete_AccountUser(client, user_id: str):
@@ -264,10 +281,15 @@ def Update_AccountUser(client, body: UpdateUserRequest):
 # ─────────────────────────────────────────
 
 @router.get("/ShowAccountUser")
-def ShowAccountUser():
+def ShowAccountUser(
+    page: int = Query(1, ge=1),
+    limit: int = Query(10, ge=1, le=100),
+    search: str = Query("", max_length=100),
+):
+    """คืนบัญชีทีละหน้าเป็น {items, total, page, limit} (ไม่ส่ง page = หน้า 1)"""
     try:
         client = Connect_MongoDB()
-        return GetData_AccountUser(client=client)
+        return GetPage_AccountUser(client, page, limit, search)
     except HTTPException:
         raise
     except Exception as e:

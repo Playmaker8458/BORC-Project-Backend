@@ -1,7 +1,8 @@
 import logging
+import re
 
 logger = logging.getLogger(__name__)
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 from datetime import datetime, timezone
 from Admin.Database.ConnectDB import Connect_MongoDB
@@ -45,16 +46,34 @@ def save_history(col_history, first_name: str, last_name: str, role: str, status
 
 
 # ─────────────────────────────────────────
-#  GET  /Profile  – ดึงรายชื่อทั้งหมด
+#  GET  /Profile  – ดึงรายชื่อผู้รอยืนยันสิทธิ์ ทีละหน้า
 # ─────────────────────────────────────────
-@router.get("/Profile")
-def get_all_profiles():
-    client = Connect_MongoDB()
+# ผู้รอยืนยันสิทธิ์ = ไม่ถูกระงับ และไม่ใช่ "Approved ที่มีบทบาทแล้ว" (ตรงกับ isAwaitingVerification ฝั่ง frontend)
+_AWAITING_VERIFICATION = {"$and": [
+    {"Status": {"$ne": "Suspended"}},
+    {"$nor": [{"Status": "Approved", "Role": {"$in": ["Student", "Advisor"]}}]},
+]}
 
-    db  = client["BORC"]
-    col = db["UserProfile"]
-    profiles = list(col.find({}, {"_id": 0}))
-    return profiles
+
+@router.get("/Profile")
+def get_all_profiles(
+    page: int = Query(1, ge=1),
+    limit: int = Query(10, ge=1, le=100),
+    search: str = Query("", max_length=100),
+):
+    """คืน {items, total, page, limit}: กรองสถานะ ค้นหาชื่อ/นามสกุล และแบ่งหน้าที่ MongoDB
+    page เกินหน้าสุดท้ายจะถูกปรับกลับมาหน้าสุดท้าย (เช่น อนุมัติรายการสุดท้ายของหน้าไปแล้ว)"""
+    col = Connect_MongoDB()["BORC"]["UserProfile"]
+    query: dict = {**_AWAITING_VERIFICATION}
+    term = search.strip()
+    if term:
+        rx = {"$regex": re.escape(term), "$options": "i"}
+        query = {"$and": [*_AWAITING_VERIFICATION["$and"], {"$or": [{"Firstname": rx}, {"Lastname": rx}]}]}
+
+    total = col.count_documents(query)
+    page = min(page, max(1, -(-total // limit)))
+    items = list(col.find(query, {"_id": 0}).sort("_id", 1).skip((page - 1) * limit).limit(limit))
+    return {"items": items, "total": total, "page": page, "limit": limit}
 
 
 # ─────────────────────────────────────────
