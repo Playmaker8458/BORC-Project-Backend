@@ -158,25 +158,6 @@ def test_cancel_booking_allows_rescheduled_status(mqs_client, mongo_client):
     assert booking["Status"] == "Cancelled"
 
 
-def test_cancel_booking_blocked_after_two_cancels_today(mqs_client, mongo_client):
-    _seed_user(mongo_client, "student-1")
-    from datetime import datetime, timezone
-    now = datetime.now(timezone.utc)
-    for _ in range(2):
-        mongo_client["BORC"]["CancelBookingHistory"].insert_one(
-            {"cancelledById": "student-1", "cancelledByRole": "Student", "createdAt": now}
-        )
-    _insert_booking(mongo_client, Status="Pending", Date="2099-01-01", Time="09:00-10:00")
-
-    resp = mqs_client.request(
-        "DELETE", "/CancelBooking", json={"cancelReason": ""}, cookies=_cookies("student-1")
-    )
-
-    assert resp.status_code == 400
-    booking = mongo_client["BORC"]["BookingOnline"].find_one({"UserId": "student-1"})
-    assert booking["Status"] == "Pending"
-
-
 def test_cancel_booking_rejects_in_progress_status(mqs_client, mongo_client):
     """InProgress bookings (consultation under way) cannot be self-cancelled."""
     _seed_user(mongo_client, "student-1")

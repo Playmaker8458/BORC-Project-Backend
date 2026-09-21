@@ -215,9 +215,9 @@ BUDGET = {
     "student AvailableSlots": 2,
     "student BookingStatus": 2,
     "student BookingOnline (POST)": 9,
-    "student MyBookingDetail": 3,  # +1 count ยกเลิกวันนี้ (CancelLimitReached)
+    "student MyBookingDetail": 2,
     "student CheckRescheduleEligibility": 2,
-    "student CancelBooking": 9,  # +1 count ยกเลิกวันนี้ (โควตา 2 ครั้ง/วัน)
+    "student CancelBooking": 8,
     "student reschedule BookingInfo": 2,
     "student reschedule AvailableSlots": 3,
     "student reschedule RescheduleBooking": 10,
