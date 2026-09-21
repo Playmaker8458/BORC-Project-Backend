@@ -19,7 +19,7 @@ chatbot_uri = CHATBOT_URL
 
 # ✅ เพิ่ม InProgress เข้า ACTIVE_STATUSES
 ACTIVE_STATUSES      = ["Pending", "Approved", "Rescheduled", "InProgress"]
-CANCELLABLE_STATUSES = ["Pending", "Approved"]
+CANCELLABLE_STATUSES = ["Pending", "Approved", "Rescheduled"]
 CONFIRMABLE_STATUSES = ["Pending", "Rescheduled"]
 
 
@@ -207,7 +207,7 @@ def advisor_cancel_queue(request: Request, body: CancelBody, background_tasks: B
         start        = time_parts[0].strip() if len(time_parts) == 2 else ""
         end          = time_parts[1].strip() if len(time_parts) == 2 else ""
 
-        if booking["Status"] == "Pending":
+        if booking["Status"] in ("Pending", "Rescheduled"):
             if start and is_within_advisor_cutoff_window(date_str, start):
                 raise HTTPException(
                     status_code=400,
