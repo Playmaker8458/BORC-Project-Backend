@@ -3,6 +3,8 @@ import logging
 from contextlib import asynccontextmanager, suppress
 from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from common.booking_worker import auto_update_status
+from common.indexes import ensure_booking_indexes, ensure_unique_indexes
 from common.origin_guard import OriginGuardMiddleware
 from common.security_headers import SecurityHeadersMiddleware, docs_kwargs
 from dotenv import load_dotenv
@@ -16,17 +18,13 @@ from Admin.router.GetProfileUser import router as GetProfile_router
 from Admin.router.ManagementAccount import router as ManagementAccount_router
 from Admin.router.GetHistoryAccount import router as GetHistoryAccount_router
 from Admin.router.SettingAdmin import router as SettingAdmin_router
-from Admin.router.test import router as CountUser_router
+from Admin.router.CountUser import router as CountUser_router
 
 from users.auth.authUser import router as auth_router_user, require_advisor, require_student
 from users.router.SetupProfile import router as SetupProfile_router
 from users.router.WaitingApproval import router as WaitingApproval_router
 
-from users.router.Students.BookingOnline import (
-    router as BookingOnline_router,
-    auto_update_status,
-    ensure_booking_indexes,
-)
+from users.router.Students.BookingOnline import router as BookingOnline_router
 from users.router.Students.Show_BookingData import router as ShowDataBooking_router
 from users.router.Students.ManageQueueStudent import router as ManageQueueStudent_router
 from users.router.Students.Reschedule_Students import router as RescheduleStudent_router
@@ -37,11 +35,11 @@ from users.router.Students.ChatStudent import router as ChatStudent_router
 
 from users.router.Advisor.ManageTimeSlots import router as ManageTime_router
 from users.router.Advisor.ManageQueueAdvisor import router as ManageQueueAdvisor_router
-from users.router.Advisor.Rechedule_Advisor import router as RecheduleAdvisor_router
+from users.router.Advisor.Reschedule_Advisor import router as RecheduleAdvisor_router
 from users.router.Advisor.Show_Consult import router as ShowConsult_router
 from users.router.Advisor.ConsultationAvailability import router as ConsultationAvailability_router
 from users.router.Advisor.QueuehistoryAdvisor import router as QueuehistoryAdvisor_router
-from users.router.Advisor.testChatAdvisor import router as DataApproved_router, client as chat_mongo_client
+from users.router.Advisor.ChatAdvisor import router as DataApproved_router, client as chat_mongo_client
 
 
 from users.router.SettingProfile import router as SettingProfile_router
@@ -65,6 +63,7 @@ async def lifespan(app: FastAPI):
     try:
         client = Connect_MongoDB()  # shared singleton (common/mongodb_atlas.py) — ห้าม close()
         ensure_booking_indexes(client["BORC"])
+        ensure_unique_indexes(client["BORC"])
     except Exception:
         logging.exception("booking status worker startup failed")
 
@@ -75,7 +74,7 @@ async def lifespan(app: FastAPI):
         worker.cancel()
         with suppress(asyncio.CancelledError):
             await worker
-        # ปิด AsyncMongoClient ที่ chat routers (testChatAdvisor.py/ChatStudent.py) ใช้ร่วมกัน
+        # ปิด AsyncMongoClient ที่ chat routers (ChatAdvisor.py/ChatStudent.py) ใช้ร่วมกัน
         # ป้องกัน connection ค้างตอน shutdown (เดิมสร้างตอน import แต่ไม่เคยถูกปิด)
         await chat_mongo_client.close()
 

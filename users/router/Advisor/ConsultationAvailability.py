@@ -5,12 +5,12 @@ from fastapi import APIRouter, HTTPException, Request
 from ...Database.ConnectDB import Connect_MongoDB
 from ...auth.authUser import verify_user_token, get_user_id
 from datetime import datetime, timezone
+from common.booking_status import ACTIVE_STATUSES
+from common.slot_service import validate_date_or_400
 from pydantic import BaseModel
 from typing import List
 
 router = APIRouter()
-
-ACTIVE_STATUSES = ["Pending", "Approved", "InProgress", "Rescheduled"]
 
 
 class SlotToggle(BaseModel):
@@ -33,6 +33,7 @@ def get_day_slots(date: str, request: Request):
     try:
         payload    = verify_user_token(request)
         advisor_id = get_user_id(payload)
+        validate_date_or_400(date)  # ใช้ประกอบ key `dates.{date}` — ห้ามรับรูปแบบแปลก
 
         db     = Connect_MongoDB()["BORC"]
         ts_col = db["ManageTimeSlots"]
@@ -116,6 +117,7 @@ def save_day_schedule(body: SaveScheduleBody, request: Request):
     try:
         payload    = verify_user_token(request)
         advisor_id = get_user_id(payload)
+        validate_date_or_400(body.date)  # ใช้ประกอบ key `dates.{date}` — ห้ามรับรูปแบบแปลก
 
         db     = Connect_MongoDB()["BORC"]
         ts_col = db["ManageTimeSlots"]
@@ -171,13 +173,20 @@ def save_day_schedule(body: SaveScheduleBody, request: Request):
             updated_ts_slots.append(updated_s)
 
         # ✅ update ด้วย _id ของ document ที่เจอ ป้องกันอัปเดตผิด document
-        ts_col.update_one(
-            {"_id": doc_id},
+        # เขียนเมื่อวันนั้นยังเท่ากับที่อ่านมา: ถ้านักศึกษาจอง (ล็อก slot) ตัดหน้าระหว่างนี้
+        # การเขียนทั้ง array กลับจะทับ lock ทิ้ง จึงตอบ 409 ให้ผู้ใช้ลองใหม่แทน
+        saved = ts_col.update_one(
+            {"_id": doc_id, f"dates.{body.date}": existing_slots},
             {"$set": {
                 f"dates.{body.date}": updated_ts_slots,
                 "updatedAt"         : now,
             }}
         )
+        if saved.matched_count == 0:
+            raise HTTPException(
+                status_code=409,
+                detail="ช่วงเวลามีการเปลี่ยนแปลงพร้อมกัน (เช่น มีนักศึกษาจอง) กรุณาลองใหม่อีกครั้ง",
+            )
 
         # ── บันทึกลง ConsultationAvailability ────────────────────────────────
         av_slots = []

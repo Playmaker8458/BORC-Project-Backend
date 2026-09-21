@@ -4,7 +4,7 @@ Regression tests สำหรับจุดที่แก้ไขจาก se
 1. SetupProfile.py ต้องออก JWT ผ่าน common/jwt_utils (shared util) แทนการ
    เรียก jwt.encode (PyJWT) ตรง ๆ — token ที่ได้ต้อง decode ได้ด้วย decode_token()
    เดียวกับที่ authUser.py ใช้ (พิสูจน์ว่าใช้ secret/algorithm ชุดเดียวกันจริง)
-2. Reschedule_Students.py / Rechedule_Advisor.py: bug เดิมเรียก `.json()` บน
+2. Reschedule_Students.py / Reschedule_Advisor.py: bug เดิมเรียก `.json()` บน
    module `requests`/object คำขอ (ไม่ใช่ response ที่ได้จาก .post()) ทำให้
    AttributeError ทุกครั้งแม้ POST ไปหา ChatBot สำเร็จ — ทดสอบว่าตอนนี้เรียก
    `.json()` บน response object ที่ถูกต้อง และไม่ log ว่า "ล้มเหลว" เมื่อ POST
@@ -17,7 +17,7 @@ Regression tests สำหรับจุดที่แก้ไขจาก se
    ที่ยืนยันด้วยการยิง WS เข้า live server) แต่ละ handler เช็ค auth เอง
    (verify_user_token/get_current_user_ws + ensure_user_role) อยู่แล้วทั้ง
    REST และ WebSocket จึงไม่ต้องพึ่ง router-level dependency
-4. Admin/router/test.py (`/Count/CountUser`) ต้องจับ exception แล้วตอบ
+4. Admin/router/CountUser.py (`/Count/CountUser`) ต้องจับ exception แล้วตอบ
    generic 500 message แทนที่จะปล่อย unhandled exception หลุดออกไป
 """
 
@@ -25,6 +25,7 @@ from datetime import timedelta
 
 import mongomock
 import pytest
+import requests
 from fastapi import Depends, FastAPI
 from fastapi.testclient import TestClient
 
@@ -103,7 +104,7 @@ def test_reschedule_students_notify_calls_json_on_response_not_module(monkeypatc
         calls["called"] = True
         return _FakeChatBotResponse()
 
-    monkeypatch.setattr(rs.req, "post", fake_post)
+    monkeypatch.setattr(requests, "post", fake_post)
 
     booking = {
         "AdvisorId": "advisor-1",
@@ -119,7 +120,7 @@ def test_reschedule_students_notify_calls_json_on_response_not_module(monkeypatc
         # ทำซ้ำ logic ส่วนแจ้งเตือนตามที่อยู่ใน RescheduleStudent handler จริง
         advisor_id = booking.get("AdvisorId", "")
         try:
-            notify_resp = rs.req.post(
+            notify_resp = requests.post(
                 f"{rs.chatbot_uri}/NotifyQueueAdivsor/RecheduleAdvisor",
                 json={
                     "AdvisorId": advisor_id,
@@ -142,7 +143,7 @@ def test_reschedule_students_notify_calls_json_on_response_not_module(monkeypatc
 
 
 def test_rechedule_advisor_notify_calls_json_on_response_not_module(monkeypatch, caplog):
-    from users.router.Advisor import Rechedule_Advisor as ra
+    from users.router.Advisor import Reschedule_Advisor as ra
 
     calls = {}
 
@@ -150,7 +151,7 @@ def test_rechedule_advisor_notify_calls_json_on_response_not_module(monkeypatch,
         calls["called"] = True
         return _FakeChatBotResponse()
 
-    monkeypatch.setattr(ra.http_req, "post", fake_post)
+    monkeypatch.setattr(requests, "post", fake_post)
 
     booking = {"UserId": "student-1", "StudentName": "ทดสอบ นักศึกษา"}
 
@@ -162,7 +163,7 @@ def test_rechedule_advisor_notify_calls_json_on_response_not_module(monkeypatch,
     with caplog.at_level("WARNING"):
         user_id_student = booking.get("UserId", "")
         try:
-            notify_resp = ra.http_req.post(
+            notify_resp = requests.post(
                 f"{ra.chatbot_uri}/NotifyQueueStudent/RecheduleStudent",
                 json={
                     "UserId": user_id_student,
@@ -185,8 +186,8 @@ def test_rechedule_advisor_notify_calls_json_on_response_not_module(monkeypatch,
 # ── 3. chat routers ต้องมี dependencies ระดับ router ─────────────────────────
 
 def test_main_closes_chat_mongo_client_on_shutdown():
-    """Regression: testChatAdvisor.py's module-level AsyncMongoClient (shared with
-    ChatStudent.py via `from ..Advisor.testChatAdvisor import db`) is created at
+    """Regression: ChatAdvisor.py's module-level AsyncMongoClient (shared with
+    ChatStudent.py via `from ..Advisor.ChatAdvisor import db`) is created at
     import time but was never closed -> connection leak on app shutdown. main.py
     must import it and close it in the lifespan's shutdown path.
     (Static source check — actually running main.py's lifespan needs a real Mongo
@@ -196,7 +197,7 @@ def test_main_closes_chat_mongo_client_on_shutdown():
 
     source = Path("main.py").read_text(encoding="utf-8")
 
-    assert "chat_mongo_client" in source, "main.py ต้อง import client จาก testChatAdvisor.py"
+    assert "chat_mongo_client" in source, "main.py ต้อง import client จาก ChatAdvisor.py"
     assert "await chat_mongo_client.close()" in source, (
         "lifespan ต้องปิด chat_mongo_client ตอน shutdown"
     )
@@ -267,7 +268,7 @@ def test_chat_student_router_included_before_chat_advisor_router():
 
 def test_chat_advisor_router_rejects_unauthenticated_at_dependency_layer(monkeypatch):
     from users.auth.authUser import require_advisor
-    from users.router.Advisor import testChatAdvisor as chat_advisor
+    from users.router.Advisor import ChatAdvisor as chat_advisor
 
     app = FastAPI()
     app.include_router(
@@ -301,7 +302,7 @@ def test_chat_student_router_rejects_unauthenticated_at_dependency_layer():
 
 @pytest.fixture
 def count_user_app(monkeypatch):
-    from Admin.router import test as count_router
+    from Admin.router import CountUser as count_router
 
     app = FastAPI()
     app.include_router(count_router.router, prefix="/Count")

@@ -3,7 +3,7 @@ Characterization tests สำหรับ flow ที่ซับซ้อนท
 
 - Students/BookingOnline.py        POST /BookingOnline            (create_booking)
 - Students/Reschedule_Students.py  PUT  /RescheduleBooking        (นักศึกษาเลื่อนคิว)
-- Advisor/Rechedule_Advisor.py     PUT  /RescheduleBooking        (อาจารย์เลื่อนคิว)
+- Advisor/Reschedule_Advisor.py     PUT  /RescheduleBooking        (อาจารย์เลื่อนคิว)
 
 เป้าหมายคือยืนยันว่าการแยกฟังก์ชันย่อยไม่เปลี่ยนพฤติกรรม: status code, ข้อมูลที่เขียนลง DB
 (booking / slot / history) และ payload ที่ส่งไปแจ้งเตือน
@@ -22,6 +22,8 @@ from common.jwt_utils import encode_token
 
 FUTURE = "2099-01-01"
 FUTURE2 = "2099-02-01"
+UPLOADS: list = []   # ไฟล์ที่ create_booking ส่งไปเก็บ (fake_store ใน bo_ctx)
+DELETED: list = []   # public_id ที่ถูกสั่งลบ
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -155,8 +157,16 @@ def bo_ctx(mongo_client, monkeypatch):
     notified = []
     monkeypatch.setattr(authUser, "Connect_MongoDB", lambda: mongo_client)
     monkeypatch.setattr(bo, "Connect_MongoDB", lambda: client)
-    monkeypatch.setattr(bo, "auto_update_status", lambda db: None)
     monkeypatch.setattr(bo, "_notify_advisor_background", lambda url, payload: notified.append((url, payload)))
+    # เทสต์ flow การจองไม่ต้องแตะ GridFS จริง (proxy DB ของ fixture นี้ไม่ใช่ Database จริง): บันทึกสิ่งที่ถูกเก็บ/ลบไว้ใน UPLOADS / DELETED
+    UPLOADS.clear()
+    DELETED.clear()
+
+    def fake_store(db, attachment):
+        UPLOADS.append(attachment)
+        return f"fake-file-id-{len(UPLOADS)}"
+    monkeypatch.setattr(bo, "store_attachment", fake_store)
+    monkeypatch.setattr(bo, "delete_attachments", lambda db, ids: DELETED.extend(ids))
 
     app = FastAPI()
     app.include_router(bo.router)
@@ -193,6 +203,44 @@ def test_create_booking_success_locks_slot_inserts_booking_and_notifies(bo_ctx):
         "AdvisorId": "advisor-1", "StudentName": "นายทดสอบ ระบบ", "ResearchTopic": "หัวข้อ",
         "Date": FUTURE, "Time": "09:00-10:00", "Status": "Pending",
     }
+
+
+def _slot_state(mongo):
+    slot = mongo["BORC"]["ManageTimeSlots"].find_one({})["dates"][FUTURE][0]
+    return slot["booked"], slot["isLocked"], slot.get("is_closed", False)
+
+
+def test_create_booking_releases_slot_when_saving_fails(bo_ctx, monkeypatch):
+    from users.router.Students import BookingOnline as bo
+    client, mongo, notified = bo_ctx
+    _seed_slots(mongo, {FUTURE: [_slot()]})
+
+    def boom(*a, **kw):
+        raise RuntimeError("db down")
+    monkeypatch.setattr(bo, "_save_booking", boom)
+
+    resp = client.post("/BookingOnline", data=_form(), cookies=_cookies("student-1"))
+
+    assert resp.status_code == 500
+    assert _slot_state(mongo) == (0, False, False)  # slot ไม่ค้างล็อกโดยไม่มีคิว
+    assert notified == []
+
+
+def test_create_booking_duplicate_active_booking_returns_400_and_releases_slot(bo_ctx, monkeypatch):
+    from pymongo.errors import DuplicateKeyError
+    from users.router.Students import BookingOnline as bo
+    client, mongo, notified = bo_ctx
+    _seed_slots(mongo, {FUTURE: [_slot()]})
+
+    def dup(*a, **kw):
+        raise DuplicateKeyError("one_active_booking_per_user")
+    monkeypatch.setattr(bo, "_save_booking", dup)
+
+    resp = client.post("/BookingOnline", data=_form(), cookies=_cookies("student-1"))
+
+    assert resp.status_code == 400
+    assert _slot_state(mongo) == (0, False, False)
+    assert notified == []
 
 
 def test_create_booking_requires_auth(bo_ctx):
@@ -311,7 +359,87 @@ def test_create_booking_accepts_pdf_and_records_filename(bo_ctx):
     )
 
     assert resp.status_code == 200
-    assert mongo["BORC"]["BookingOnline"].find_one({})["FilePath"] == "plan.pdf"
+    booking = mongo["BORC"]["BookingOnline"].find_one({})
+    assert booking["FilePath"] == "plan.pdf"
+    assert booking["FileName"] == "plan.pdf"
+    assert booking["FileContentType"] == "application/pdf"
+    assert booking["FileSize"] == 4
+    assert booking["FileId"] == "fake-file-id-1"
+    assert [(a.filename, a.contents) for a in UPLOADS] == [("plan.pdf", b"%PDF")]  # เนื้อไฟล์ถูกส่งไปเก็บจริง
+
+
+def test_create_booking_without_file_stores_no_attachment_fields(bo_ctx):
+    client, mongo, _ = bo_ctx
+    _seed_slots(mongo, {FUTURE: [_slot()]})
+
+    resp = client.post("/BookingOnline", data=_form(), cookies=_cookies("student-1"))
+
+    assert resp.status_code == 200
+    booking = mongo["BORC"]["BookingOnline"].find_one({})
+    assert booking["FileId"] is None and booking["FileName"] is None
+    assert UPLOADS == []
+
+
+@pytest.mark.parametrize("content_type,body", [
+    ("application/pdf", b"MZ\x90\x00 this is an exe"),
+    ("application/vnd.openxmlformats-officedocument.wordprocessingml.document", b"%PDF-1.4"),
+    ("application/msword", b"PK\x03\x04"),
+])
+def test_create_booking_rejects_file_whose_content_does_not_match_type(bo_ctx, content_type, body):
+    client, mongo, _ = bo_ctx
+    _seed_slots(mongo, {FUTURE: [_slot()]})
+
+    resp = client.post("/BookingOnline", data=_form(), cookies=_cookies("student-1"),
+                       files={"file": ("x.bin", body, content_type)})
+
+    assert resp.status_code == 400
+    assert "ไม่ตรงกับชนิดไฟล์" in resp.json()["detail"]
+    assert UPLOADS == [] and mongo["BORC"]["BookingOnline"].count_documents({}) == 0
+
+
+def test_create_booking_502_when_storing_file_fails_and_slot_untouched(bo_ctx, monkeypatch):
+    from users.router.Students import BookingOnline as bo
+    client, mongo, notified = bo_ctx
+    _seed_slots(mongo, {FUTURE: [_slot()]})
+    monkeypatch.setattr(bo, "store_attachment", lambda db, a: (_ for _ in ()).throw(RuntimeError("gridfs down")))
+
+    resp = client.post("/BookingOnline", data=_form(), cookies=_cookies("student-1"),
+                       files={"file": ("plan.pdf", b"%PDF", "application/pdf")})
+
+    assert resp.status_code == 502
+    slot = mongo["BORC"]["ManageTimeSlots"].find_one({})["dates"][FUTURE][0]
+    assert (slot["booked"], slot["isLocked"]) == (0, False)  # ยังไม่ได้ล็อก slot
+    assert mongo["BORC"]["BookingOnline"].count_documents({}) == 0
+    assert notified == []
+
+
+def test_create_booking_deletes_uploaded_file_when_saving_fails(bo_ctx, monkeypatch):
+    from users.router.Students import BookingOnline as bo
+    client, mongo, _ = bo_ctx
+    _seed_slots(mongo, {FUTURE: [_slot()]})
+    monkeypatch.setattr(bo, "_save_booking", lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("db down")))
+
+    resp = client.post("/BookingOnline", data=_form(), cookies=_cookies("student-1"),
+                       files={"file": ("plan.pdf", b"%PDF", "application/pdf")})
+
+    assert resp.status_code == 500
+    assert DELETED == ["fake-file-id-1"]  # ไฟล์ที่อัปโหลดไปแล้วถูกลบ ไม่ค้างเป็นขยะ
+
+
+def test_create_booking_deletes_uploaded_file_when_slot_taken_meanwhile(bo_ctx, monkeypatch):
+    from users.router.Students import BookingOnline as bo
+    client, mongo, _ = bo_ctx
+    _seed_slots(mongo, {FUTURE: [_slot()]})
+
+    def lose_race(*a, **kw):
+        raise bo.HTTPException(status_code=400, detail="ช่วงเวลานี้ถูกจองแล้ว กรุณาเลือกช่วงเวลาอื่น")
+    monkeypatch.setattr(bo, "_lock_slot", lose_race)
+
+    resp = client.post("/BookingOnline", data=_form(), cookies=_cookies("student-1"),
+                       files={"file": ("plan.pdf", b"%PDF", "application/pdf")})
+
+    assert resp.status_code == 400
+    assert DELETED == ["fake-file-id-1"]
 
 
 # ── student reschedule ────────────────────────────────────────────────────────
@@ -415,7 +543,7 @@ def test_student_reschedule_success_full_side_effects(rs_ctx):
 
 @pytest.fixture
 def ra_ctx(mongo_client, monkeypatch):
-    from users.router.Advisor import Rechedule_Advisor as ra
+    from users.router.Advisor import Reschedule_Advisor as ra
     from users.auth import authUser
 
     notified = []

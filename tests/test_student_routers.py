@@ -55,9 +55,6 @@ def mqs_app(mongo_client, monkeypatch):
 
     monkeypatch.setattr(authUser, "Connect_MongoDB", lambda: mongo_client)
     monkeypatch.setattr(mqs, "Connect_MongoDB", lambda: mongo_client)
-    # BookingOnline.auto_update_status is imported by name; patch it to a no-op so
-    # tests aren't coupled to that unrelated module's behaviour.
-    monkeypatch.setattr(mqs, "auto_update_status", lambda db: None)
 
     app = FastAPI()
     app.include_router(mqs.router)

@@ -1,82 +1,34 @@
 import logging
-
-logger = logging.getLogger(__name__)
 import re
 import calendar
-from itertools import combinations
-from typing import List, Dict
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel, field_validator
+from pymongo.errors import DuplicateKeyError
 from ...Database.ConnectDB import Connect_MongoDB
 from ...auth.authUser import get_current_advisor
 from datetime import datetime, timezone, timedelta, date as date_type
 
 from common.slot_service import get_today_str
+from common.time_slot_rules import (
+    MAX_SLOTS_PER_DAY,
+    CopyToAllDaysRequest,
+    DeleteSlotRequest,
+    ManageTimeSlotsRequest,
+    UpdateSlotRequest,
+    check_overlap,
+    compute_is_locked,
+    is_slot,
+    merge_months,
+    new_slot,
+    preserving_slot,
+)
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
-
-# จำนวนช่วงเวลาสูงสุดที่อาจารย์ตั้งได้ต่อวัน (ต้องตรงกับ MAX_SLOTS_PER_DAY ฝั่ง frontend)
-MAX_SLOTS_PER_DAY = 3
-
-# ─────────────────────────────────────────
-# Models
-# ─────────────────────────────────────────
-class TimeSlot(BaseModel):
-    start: str
-    end  : str
-    max_booking: int = 1
-
-    class Config:
-        extra = "ignore"
-
-    @field_validator("start", "end")
-    @classmethod
-    def validate_time_format(cls, v: str) -> str:
-        if not re.match(r"^\d{1,2}:\d{2}$", v):
-            raise ValueError("รูปแบบเวลาไม่ถูกต้อง (HH:MM)")
-        h, m = v.split(":")
-        if not (0 <= int(h) <= 23 and int(m) in (0, 30)):
-            raise ValueError("เวลาต้องอยู่ระหว่าง 00:00-23:30 และเป็นทุก 30 นาที")
-        return f"{int(h):02d}:{m}"
-
-    @field_validator("max_booking")
-    @classmethod
-    def force_max_booking_one(cls, v: int) -> int:
-        return 1
-
-
-class ManageTimeSlotsRequest(BaseModel):
-    dates: Dict[str, List[TimeSlot]]
-
-
-class UpdateSlotRequest(BaseModel):
-    old_start: str
-    old_end  : str
-    new_start: str
-    new_end  : str
-
-
-class DeleteSlotRequest(BaseModel):
-    start: str
-    end  : str
-
-
-class CopyToAllDaysRequest(BaseModel):
-    target_month: str
-    slots       : List[TimeSlot]
-
 
 # ─────────────────────────────────────────
 # Helpers
 # ─────────────────────────────────────────
-def get_label(start: str) -> str:
-    hour = int(start.split(":")[0])
-    if 6  <= hour < 12: return "MORNING"
-    if 12 <= hour < 15: return "NOON"
-    if 15 <= hour < 18: return "EVENING"
-    return "NIGHT"
-
-
 def get_today_utc7() -> date_type:
     return (datetime.now(timezone.utc) + timedelta(hours=7)).date()
 
@@ -125,31 +77,6 @@ def validate_month_format(month: str) -> None:
         raise HTTPException(status_code=400, detail="รูปแบบเดือนไม่ถูกต้อง (YYYY-MM)")
 
 
-def _to_minutes(slot) -> tuple[int, int] | None:
-    """(เวลาเริ่ม, เวลาจบ) เป็นนาทีนับจาก 00:00; None ถ้าข้อมูลผิดรูปแบบ (ให้ข้ามช่วงนั้น)"""
-    try:
-        start = slot["start"] if isinstance(slot, dict) else slot.start
-        end   = slot["end"]   if isinstance(slot, dict) else slot.end
-        sh, sm = map(int, start.split(":"))
-        eh, em = map(int, end.split(":"))
-        return sh * 60 + sm, eh * 60 + em
-    except (KeyError, AttributeError, ValueError):
-        return None
-
-
-def _conflicts(a: tuple[int, int], b: tuple[int, int]) -> bool:
-    """สองช่วงเวลาชนกัน: ทับกันจริง หรือ "ติดกัน" (จบเท่ากับเวลาเริ่มของอีกช่วง นับเป็นทับด้วย)"""
-    (s1, e1), (s2, e2) = a, b
-    return (s1 < e2 and s2 < e1) or e1 == s2 or e2 == s1
-
-
-def check_overlap(slots: list) -> bool:
-    """True ถ้ามีช่วงเวลาอย่างน้อยสองช่วงชนกัน (เทียบทุกคู่ตามเดิม เพื่อคงผลกับช่วงที่เวลาจบก่อนเวลาเริ่ม
-    ซึ่ง TimeSlot ยังไม่ได้ห้ามไว้) จำนวน slot ต่อวันน้อย ต้นทุนการเทียบทุกคู่จึงเล็กน้อย"""
-    times = [t for t in map(_to_minutes, slots) if t is not None]
-    return any(_conflicts(a, b) for a, b in combinations(times, 2))
-
-
 def _raise_if_too_many_slots(date: str, count: int) -> None:
     """raise 400 ถ้าจำนวนช่วงเวลาของวันนั้นเกิน MAX_SLOTS_PER_DAY"""
     if count > MAX_SLOTS_PER_DAY:
@@ -159,16 +86,9 @@ def _raise_if_too_many_slots(date: str, count: int) -> None:
         )
 
 
-def compute_is_locked(booked: int, current_locked: bool) -> bool:
-    if booked >= 1:
-        return True
-    return current_locked
-
-
-def merge_months(existing_doc: dict, new_date_keys) -> list:
-    existing_months = set(existing_doc.get("months", [])) if existing_doc else set()
-    new_months      = {d[:7] for d in new_date_keys}
-    return sorted(existing_months | new_months)
+def _view_slot(s: dict) -> dict:
+    """slot ที่ส่งให้อาจารย์ดู: max_booking เป็น 1 เสมอ และ isLocked เป็นจริงเมื่อมีคนจองแล้ว"""
+    return {**s, "max_booking": 1, "isLocked": compute_is_locked(s.get("booked", 0), s.get("isLocked", False))}
 
 
 def get_db_collection():
@@ -185,9 +105,9 @@ def advisor_filter(payload: dict) -> dict:
 
 
 def create_timeslot_indexes(db):
-    col = db["ManageTimeSlots"]
-    col.create_index([("advisorId", 1)], unique=True, name="advisorId_unique")
-    col.create_index([("advisor_name", 1)], name="advisor_name_idx")
+    """สร้าง index ของ ManageTimeSlots — ตอนนี้เรียกจาก main.lifespan ผ่าน common/indexes.ensure_unique_indexes"""
+    from common.indexes import ensure_unique_indexes
+    ensure_unique_indexes(db)
 
 
 # ─────────────────────────────────────────
@@ -209,16 +129,7 @@ def get_my_time_slots(date: str, request: Request):
             return {"data": {"slots": []}}
 
         slots = doc.get("dates", {}).get(date, [])
-        normalized = [
-            {
-                **s,
-                "max_booking": 1,
-                "isLocked"   : s.get("isLocked", False) or s.get("booked", 0) >= 1,
-            }
-            for s in slots
-        ]
-
-        return {"data": {"slots": normalized}}
+        return {"data": {"slots": [_view_slot(s) for s in slots]}}
 
     except HTTPException:
         raise
@@ -247,14 +158,7 @@ def get_my_time_slots_by_month(month: str, request: Request):
 
         all_dates = doc.get("dates", {})
         filtered  = {
-            d: [
-                {
-                    **s,
-                    "max_booking": 1,
-                    "isLocked"   : s.get("isLocked", False) or s.get("booked", 0) >= 1,
-                }
-                for s in v
-            ]
+            d: [_view_slot(s) for s in v]
             for d, v in all_dates.items() if d.startswith(month)
         }
 
@@ -335,36 +239,6 @@ def get_time_slots(request: Request):
 # ─────────────────────────────────────────
 # Helpers: สร้าง/ค้นหา slot ที่ใช้ร่วมกันหลาย endpoint
 # ─────────────────────────────────────────
-def _new_slot(start: str, end: str, booked: int = 0, is_locked: bool = False, is_closed: bool = False) -> dict:
-    """เอกสาร slot มาตรฐานที่เก็บใน ManageTimeSlots (max_booking บังคับเป็น 1 เสมอ)"""
-    return {
-        "label"      : get_label(start),
-        "start"      : start,
-        "end"        : end,
-        "max_booking": 1,
-        "booked"     : booked,
-        "isLocked"   : is_locked,
-        "is_closed"  : is_closed,
-    }
-
-
-def _preserving_slot(start: str, end: str, old: dict | None) -> dict:
-    """slot ที่บันทึกใหม่ โดยคงจำนวนที่ถูกจองและสถานะล็อก/ปิดของ slot เดิม (ถ้ามี)
-
-    ถ้ามีคนจองแล้ว (booked >= 1) จะล็อกและปิดเสมอ (compute_is_locked)
-    """
-    booked = old.get("booked", 0) if old else 0
-    return _new_slot(
-        start, end, booked,
-        is_locked=compute_is_locked(booked, old.get("isLocked", False) if old else False),
-        is_closed=compute_is_locked(booked, old.get("is_closed", False) if old else False),
-    )
-
-
-def _is_slot(slot: dict, start: str, end: str) -> bool:
-    return slot["start"] == start and slot["end"] == end
-
-
 def _upsert_advisor_document(col, payload: dict, set_fields: dict, now: datetime) -> None:
     """เขียนข้อมูล slot ของอาจารย์ (สร้างเอกสารใหม่ถ้ายังไม่มี) — advisorId/ชื่อ/createdAt ตั้งเฉพาะตอนสร้าง"""
     col.update_one(
@@ -397,9 +271,40 @@ def _load_day_slots(col, payload: dict, date: str, extra_fields: dict | None = N
     return existing, old_slots
 
 
+# ─────────────────────────────────────────
+# เขียนแบบ compare-and-set: กันเขียนทับ booked/isLocked ที่นักศึกษาเพิ่งล็อกระหว่างที่อาจารย์แก้
+# ─────────────────────────────────────────
+MAX_WRITE_ATTEMPTS = 3
+
+
+def _unchanged_days_filter(payload: dict, expected_days: dict) -> dict:
+    """filter ที่ match เฉพาะเมื่อแต่ละวันยังเท่ากับที่อ่านมา (วันที่ไม่มีเลย = ไม่มี field หรือ array ว่าง)"""
+    cond = {
+        f"dates.{date}": slots if slots else {"$in": [None, []]}
+        for date, slots in expected_days.items()
+    }
+    return {**advisor_filter(payload), **cond}
+
+
+def _write_if_unchanged(col, payload: dict, expected_days: dict, update: dict) -> bool:
+    """update เมื่อวันที่เกี่ยวข้องยังไม่ถูกแก้โดยคนอื่น; คืน False ถ้าถูกแก้ตัดหน้า (ให้อ่านใหม่แล้วลองซ้ำ)"""
+    return col.update_one(_unchanged_days_filter(payload, expected_days), update).matched_count == 1
+
+
+def _retry_write(attempt) -> None:
+    """เรียก attempt() (อ่าน→คำนวณ→เขียน คืน True เมื่อเขียนสำเร็จ) ซ้ำได้ MAX_WRITE_ATTEMPTS ครั้ง ไม่งั้น 409"""
+    for _ in range(MAX_WRITE_ATTEMPTS):
+        if attempt():
+            return
+    raise HTTPException(
+        status_code=409,
+        detail="ช่วงเวลามีการเปลี่ยนแปลงพร้อมกัน (เช่น มีนักศึกษาจอง) กรุณาลองใหม่อีกครั้ง",
+    )
+
+
 def _find_unlocked_target(old_slots: list, date: str, start: str, end: str, action: str) -> dict:
     """หา slot ที่จะแก้/ลบ; raise 404 ถ้าไม่พบ, 400 ถ้าถูกล็อกแล้ว (action = "แก้ไข" หรือ "ลบ")"""
-    target = next((s for s in old_slots if _is_slot(s, start, end)), None)
+    target = next((s for s in old_slots if is_slot(s, start, end)), None)
     if not target:
         raise HTTPException(
             status_code=404,
@@ -411,6 +316,25 @@ def _find_unlocked_target(old_slots: list, date: str, start: str, end: str, acti
             detail=f"ช่วงเวลา {start}-{end} ถูกล็อกแล้ว ไม่สามารถ{action}ได้"
         )
     return target
+
+
+def _write_new_days(col, payload: dict, existing: dict | None, current_dates: dict, new_days: dict) -> bool:
+    """เขียน slot ของหลายวัน (วัน -> slot) พร้อมอัปเดต months; คืน False ถ้าถูกแก้ตัดหน้า (ให้อ่านใหม่แล้วลองซ้ำ)"""
+    now        = datetime.now(timezone.utc)
+    set_fields = {"updatedAt": now}
+    for date, day_slots in new_days.items():
+        set_fields[f"dates.{date}"] = day_slots
+    set_fields["months"] = merge_months(existing, list(current_dates.keys()) + list(new_days.keys()))
+
+    if existing is None:  # อาจารย์ใหม่ ยังไม่มีเอกสารให้ compare → สร้างด้วย upsert
+        try:
+            _upsert_advisor_document(col, payload, set_fields, now)
+        except DuplicateKeyError:
+            # อีกคำขอสร้างเอกสารของอาจารย์คนนี้ตัดหน้า (unique advisorId): อ่านใหม่แล้วเขียนแบบ compare-and-set
+            return False
+        return True
+    expected = {date: current_dates.get(date, []) for date in new_days}
+    return _write_if_unchanged(col, payload, expected, {"$set": set_fields})
 
 
 # ─────────────────────────────────────────
@@ -433,7 +357,7 @@ def _merge_day_slots(date: str, existing_slots: list, incoming: list) -> list:
 
     _raise_if_too_many_slots(date, len(kept_slots) + len(incoming_times))
 
-    new_slots = [_preserving_slot(s.start, s.end, existing_map.get((s.start, s.end))) for s in incoming]
+    new_slots = [preserving_slot(s.start, s.end, existing_map.get((s.start, s.end))) for s in incoming]
     return sorted(kept_slots + new_slots, key=lambda s: s["start"])
 
 
@@ -449,16 +373,15 @@ def save_time_slots(data: ManageTimeSlotsRequest, request: Request):
         payload = get_current_advisor(request)
         col     = get_db_collection()
 
-        existing      = col.find_one(advisor_filter(payload))
-        current_dates = existing.get("dates", {}) if existing else {}
+        def attempt() -> bool:
+            existing      = col.find_one(advisor_filter(payload))
+            current_dates = existing.get("dates", {}) if existing else {}
 
-        now        = datetime.now(timezone.utc)
-        set_fields = {"updatedAt": now}
-        for date, slots in data.dates.items():
-            set_fields[f"dates.{date}"] = _merge_day_slots(date, current_dates.get(date, []), slots)
-        set_fields["months"] = merge_months(existing, list(current_dates.keys()) + list(data.dates.keys()))
+            new_days = {date: _merge_day_slots(date, current_dates.get(date, []), slots)
+                        for date, slots in data.dates.items()}
+            return _write_new_days(col, payload, existing, current_dates, new_days)
 
-        _upsert_advisor_document(col, payload, set_fields, now)
+        _retry_write(attempt)
 
         return {"message": "บันทึกช่วงเวลาให้คำปรึกษาสำเร็จ"}
 
@@ -502,7 +425,7 @@ def _plan_copy_days(slots: list, year: int, month_num: int, days_in_month: int, 
 
         if existing_slots:
             overwrite_days.append(date_str)
-        to_write[date_str] = [_new_slot(s.start, s.end) for s in slots]
+        to_write[date_str] = [new_slot(s.start, s.end) for s in slots]
 
     return to_write, skipped_days, overwrite_days
 
@@ -525,26 +448,27 @@ def copy_to_all_days(data: CopyToAllDaysRequest, request: Request):
         year, month_num  = map(int, data.target_month.split("-"))
         _, days_in_month = calendar.monthrange(year, month_num)
 
-        col           = get_db_collection()
-        existing      = col.find_one(advisor_filter(payload))
-        current_dates = existing.get("dates", {}) if existing else {}
+        col    = get_db_collection()
+        result = {}
 
-        to_write, skipped_days, overwrite_days = _plan_copy_days(
-            data.slots, year, month_num, days_in_month, today, current_dates
-        )
-        if not to_write:
-            raise HTTPException(
-                status_code=400,
-                detail="ไม่มีวันที่สามารถ copy ได้ (ทุกวันในเดือนนี้ผ่านมาแล้ว หรือมีการจองอยู่ทั้งหมด)"
+        def attempt() -> bool:
+            existing      = col.find_one(advisor_filter(payload))
+            current_dates = existing.get("dates", {}) if existing else {}
+
+            to_write, skipped_days, overwrite_days = _plan_copy_days(
+                data.slots, year, month_num, days_in_month, today, current_dates
             )
+            if not to_write:
+                raise HTTPException(
+                    status_code=400,
+                    detail="ไม่มีวันที่สามารถ copy ได้ (ทุกวันในเดือนนี้ผ่านมาแล้ว หรือมีการจองอยู่ทั้งหมด)"
+                )
 
-        now        = datetime.now(timezone.utc)
-        set_fields = {"updatedAt": now}
-        for date_str, day_slots in to_write.items():
-            set_fields[f"dates.{date_str}"] = day_slots
-        set_fields["months"] = merge_months(existing, list(current_dates.keys()) + list(to_write.keys()))
+            result.update(to_write=to_write, skipped_days=skipped_days, overwrite_days=overwrite_days)
+            return _write_new_days(col, payload, existing, current_dates, to_write)
 
-        _upsert_advisor_document(col, payload, set_fields, now)
+        _retry_write(attempt)
+        to_write, skipped_days, overwrite_days = result["to_write"], result["skipped_days"], result["overwrite_days"]
 
         copied_days = len(to_write)
         return {
@@ -575,33 +499,35 @@ def update_time_slot(date: str, data: UpdateSlotRequest, request: Request):
         payload = get_current_advisor(request)
         col     = get_db_collection()
 
-        _, old_slots = _load_day_slots(col, payload, date)
-        target = _find_unlocked_target(old_slots, date, data.old_start, data.old_end, "แก้ไข")
+        def attempt() -> bool:
+            _, old_slots = _load_day_slots(col, payload, date)
+            target = _find_unlocked_target(old_slots, date, data.old_start, data.old_end, "แก้ไข")
 
-        # ─── นัดหมายแล้ว (มีนักศึกษาจอง) ห้ามแก้ไขช่วงเวลาก่อนถึงวันให้คำปรึกษา ───
-        # ป้องกันได้ตรงกว่าเช็คแบบอิงวันที่ปฏิทิน (เช่น "ห้ามแก้ไขเฉพาะวันพรุ่งนี้")
-        # เพราะครอบคลุมทุกนัดหมายไม่ว่าจะอยู่ห่างจากวันนี้กี่วัน และกันอาจารย์กดแก้ไข
-        # นัดหมายที่มีอยู่แล้วโดยไม่ตั้งใจไปในตัว
-        time_changed = data.new_start != data.old_start or data.new_end != data.old_end
-        if target.get("booked", 0) > 0 and time_changed:
-            raise HTTPException(
-                status_code=400,
-                detail=f"ไม่สามารถเปลี่ยนเวลา {data.old_start}-{data.old_end} ได้ เพราะมีนักศึกษาจองแล้ว"
+            # ─── นัดหมายแล้ว (มีนักศึกษาจอง) ห้ามแก้ไขช่วงเวลาก่อนถึงวันให้คำปรึกษา ───
+            # ป้องกันได้ตรงกว่าเช็คแบบอิงวันที่ปฏิทิน (เช่น "ห้ามแก้ไขเฉพาะวันพรุ่งนี้")
+            # เพราะครอบคลุมทุกนัดหมายไม่ว่าจะอยู่ห่างจากวันนี้กี่วัน และกันอาจารย์กดแก้ไข
+            # นัดหมายที่มีอยู่แล้วโดยไม่ตั้งใจไปในตัว
+            time_changed = data.new_start != data.old_start or data.new_end != data.old_end
+            if target.get("booked", 0) > 0 and time_changed:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"ไม่สามารถเปลี่ยนเวลา {data.old_start}-{data.old_end} ได้ เพราะมีนักศึกษาจองแล้ว"
+                )
+
+            other_slots = [s for s in old_slots if not is_slot(s, data.old_start, data.old_end)]
+            if check_overlap(other_slots + [{"start": data.new_start, "end": data.new_end}]):
+                raise HTTPException(status_code=400, detail="ช่วงเวลาใหม่ซ้อนกับช่วงเวลาอื่น")
+
+            updated_slots = [
+                preserving_slot(data.new_start, data.new_end, target) if is_slot(s, data.old_start, data.old_end) else s
+                for s in old_slots
+            ]
+            return _write_if_unchanged(
+                col, payload, {date: old_slots},
+                {"$set": {f"dates.{date}": updated_slots, "updatedAt": datetime.now(timezone.utc)}},
             )
 
-        other_slots = [s for s in old_slots if not _is_slot(s, data.old_start, data.old_end)]
-        if check_overlap(other_slots + [{"start": data.new_start, "end": data.new_end}]):
-            raise HTTPException(status_code=400, detail="ช่วงเวลาใหม่ซ้อนกับช่วงเวลาอื่น")
-
-        updated_slots = [
-            _preserving_slot(data.new_start, data.new_end, target) if _is_slot(s, data.old_start, data.old_end) else s
-            for s in old_slots
-        ]
-
-        col.update_one(
-            advisor_filter(payload),
-            {"$set": {f"dates.{date}": updated_slots, "updatedAt": datetime.now(timezone.utc)}}
-        )
+        _retry_write(attempt)
 
         return {"message": f"อัปเดตช่วงเวลา {data.old_start}-{data.old_end} → {data.new_start}-{data.new_end} สำเร็จ"}
 
@@ -615,8 +541,11 @@ def update_time_slot(date: str, data: UpdateSlotRequest, request: Request):
 # ─────────────────────────────────────────
 # DELETE /DeleteTimeSlots/{date}
 # ─────────────────────────────────────────
-def _delete_last_slot_of_day(col, payload: dict, date: str, existing: dict) -> dict:
-    """ลบวันนั้นออกทั้งวัน (slot สุดท้ายถูกลบ) และตัดเดือนออกจาก months ถ้าไม่เหลือวันอื่นในเดือนนั้น"""
+def _delete_last_slot_of_day(col, payload: dict, date: str, existing: dict, old_slots: list) -> bool:
+    """ลบวันนั้นออกทั้งวัน (slot สุดท้ายถูกลบ) และตัดเดือนออกจาก months ถ้าไม่เหลือวันอื่นในเดือนนั้น
+
+    คืน False ถ้าวันนั้นถูกแก้ตัดหน้า (ไม่ได้ลบ ให้ผู้เรียกอ่านใหม่แล้วลองซ้ำ)
+    """
     month_of_date   = date[:7]
     existing_months = set(existing.get("months", []))
 
@@ -627,14 +556,13 @@ def _delete_last_slot_of_day(col, payload: dict, date: str, existing: dict) -> d
     if not any(d.startswith(month_of_date) for d in remaining_dates):
         existing_months.discard(month_of_date)
 
-    col.update_one(
-        advisor_filter(payload),
+    return _write_if_unchanged(
+        col, payload, {date: old_slots},
         {
             "$unset": {f"dates.{date}": "", f"max_booking_config.{date}": ""},
             "$set"  : {"months": sorted(existing_months), "updatedAt": datetime.now(timezone.utc)},
-        }
+        },
     )
-    return {"message": f"ลบช่วงเวลาสุดท้ายของวันที่ {date} สำเร็จ"}
 
 
 @router.delete("/DeleteTimeSlots/{date}")
@@ -647,26 +575,34 @@ def delete_time_slot(date: str, data: DeleteSlotRequest, request: Request):
         payload = get_current_advisor(request)
         col     = get_db_collection()
 
-        existing, old_slots = _load_day_slots(col, payload, date, extra_fields={"months": 1})
-        target = _find_unlocked_target(old_slots, date, data.start, data.end, "ลบ")
+        removed_whole_day = False
 
-        # ─── นัดหมายแล้ว (มีนักศึกษาจอง) ห้ามลบก่อนถึงวันให้คำปรึกษา ไม่ว่าจะอยู่ห่างจาก
-        # วันนี้กี่วันก็ตาม (แทนที่เช็คแบบอิงวันที่ปฏิทินเดิม ที่ป้องกันเฉพาะ "วันพรุ่งนี้") ───
-        if target.get("booked", 0) > 0:
-            raise HTTPException(
-                status_code=400,
-                detail=f"ไม่สามารถลบช่วงเวลา {data.start}-{data.end} ได้ เพราะมีนักศึกษาจองแล้ว"
+        def attempt() -> bool:
+            nonlocal removed_whole_day
+            existing, old_slots = _load_day_slots(col, payload, date, extra_fields={"months": 1})
+            target = _find_unlocked_target(old_slots, date, data.start, data.end, "ลบ")
+
+            # ─── นัดหมายแล้ว (มีนักศึกษาจอง) ห้ามลบก่อนถึงวันให้คำปรึกษา ไม่ว่าจะอยู่ห่างจาก
+            # วันนี้กี่วันก็ตาม (แทนที่เช็คแบบอิงวันที่ปฏิทินเดิม ที่ป้องกันเฉพาะ "วันพรุ่งนี้") ───
+            if target.get("booked", 0) > 0:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"ไม่สามารถลบช่วงเวลา {data.start}-{data.end} ได้ เพราะมีนักศึกษาจองแล้ว"
+                )
+
+            updated_slots = [s for s in old_slots if not is_slot(s, data.start, data.end)]
+            removed_whole_day = not updated_slots
+            if removed_whole_day:
+                return _delete_last_slot_of_day(col, payload, date, existing, old_slots)
+            return _write_if_unchanged(
+                col, payload, {date: old_slots},
+                {"$set": {f"dates.{date}": updated_slots, "updatedAt": datetime.now(timezone.utc)}},
             )
 
-        updated_slots = [s for s in old_slots if not _is_slot(s, data.start, data.end)]
-        if not updated_slots:
-            return _delete_last_slot_of_day(col, payload, date, existing)
+        _retry_write(attempt)
 
-        col.update_one(
-            advisor_filter(payload),
-            {"$set": {f"dates.{date}": updated_slots, "updatedAt": datetime.now(timezone.utc)}}
-        )
-
+        if removed_whole_day:
+            return {"message": f"ลบช่วงเวลาสุดท้ายของวันที่ {date} สำเร็จ"}
         return {"message": f"ลบช่วงเวลา {data.start}-{data.end} ของวันที่ {date} สำเร็จ"}
 
     except HTTPException:

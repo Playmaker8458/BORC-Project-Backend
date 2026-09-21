@@ -6,7 +6,6 @@ from pydantic import BaseModel
 from datetime import datetime, timezone
 from Admin.Database.ConnectDB import Connect_MongoDB
 from common.user_cache import invalidate_user_cache
-import requests as req  # ✅ เพิ่ม import
 from dotenv import load_dotenv
 from typing import Literal
 

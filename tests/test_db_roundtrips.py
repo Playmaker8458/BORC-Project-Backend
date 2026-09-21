@@ -108,7 +108,7 @@ def world(mongo_client, monkeypatch):
 
     from users.auth import authUser
     from users.router.Advisor import (ConsultationAvailability, ManageQueueAdvisor, ManageTimeSlots,
-                                      QueuehistoryAdvisor, Rechedule_Advisor, Show_Consult)
+                                      QueuehistoryAdvisor, Reschedule_Advisor, Show_Consult)
     from users.router.Students import (BookingOnline, ManageQueueStudent, QueuehistoryStudent, Reschedule_Students,
                                        Show_BookingData, ViewConsultationHours)
 
@@ -116,7 +116,7 @@ def world(mongo_client, monkeypatch):
     client = _CountingClient(_ArrayFilterClient(mongo_client), log)  # emulate array_filters (mongomock ไม่รองรับ)
 
     modules = [authUser, BookingOnline, ManageQueueStudent, Reschedule_Students, ViewConsultationHours,
-               Show_BookingData, QueuehistoryStudent, ManageTimeSlots, ManageQueueAdvisor, Rechedule_Advisor,
+               Show_BookingData, QueuehistoryStudent, ManageTimeSlots, ManageQueueAdvisor, Reschedule_Advisor,
                ConsultationAvailability, Show_Consult, QueuehistoryAdvisor]
     for mod in modules:
         monkeypatch.setattr(mod, "Connect_MongoDB", lambda: client)
@@ -133,7 +133,7 @@ def world(mongo_client, monkeypatch):
     app.include_router(QueuehistoryStudent.router, prefix="/QueueHistoryStudent")
     app.include_router(ManageTimeSlots.router, prefix="/ManageTimeSlots")
     app.include_router(ManageQueueAdvisor.router, prefix="/advisor-queue")
-    app.include_router(Rechedule_Advisor.router, prefix="/advisor-reschedule")
+    app.include_router(Reschedule_Advisor.router, prefix="/advisor-reschedule")
     app.include_router(Show_Consult.router, prefix="/advisor")
     app.include_router(ConsultationAvailability.router, prefix="/advisor-schedule")
     app.include_router(QueuehistoryAdvisor.router, prefix="/QueuehistoryAdvisor")
@@ -211,17 +211,17 @@ BUDGET = {
     "student ShowData": 2,
     "student BookingStats": 3,
     "student History": 5,
-    "student AvailableAdvisors": 2,
+    "student AvailableAdvisors": 3,
     "student AvailableSlots": 2,
     "student BookingStatus": 2,
-    "student BookingOnline (POST)": 9,
+    "student BookingOnline (POST)": 7,
     "student MyBookingDetail": 2,
     "student CheckRescheduleEligibility": 2,
     "student CancelBooking": 8,
     "student reschedule BookingInfo": 2,
     "student reschedule AvailableSlots": 3,
     "student reschedule RescheduleBooking": 10,
-    "student ViewConsultationHours Advisors": 2,
+    "student ViewConsultationHours Advisors": 3,
     "student ViewConsultationHours Slots": 2,
     "advisor TimeSlots": 2,
     "advisor MyTimeSlots/date": 2,

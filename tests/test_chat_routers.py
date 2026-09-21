@@ -3,7 +3,7 @@ Endpoint coverage สำหรับ chat routers ที่ก่อนหน้
 regression tests แคบ ๆ ใน test_security_fixes.py):
 
 - users/router/Students/ChatStudent.py  (StudentApprovedQueue, chat/history/mine, WS auth boundary)
-- users/router/Advisor/testChatAdvisor.py (AdvisorApprovedQueue, chat/history/{id}, chat/message, WS auth boundary)
+- users/router/Advisor/ChatAdvisor.py (AdvisorApprovedQueue, chat/history/{id}, chat/message, WS auth boundary)
 
 ทั้งสองไฟล์ใช้ `db = AsyncMongoClient(...)` (pymongo async driver, module-level
 global ที่ต่อ Mongo จริงตอน import) แทน `Connect_MongoDB()` sync ปกติ ดังนั้น
@@ -97,7 +97,7 @@ def _insert_booking(mongo_client, **kw):
 @pytest.fixture
 def chat_student_app(mongo_client, monkeypatch):
     from users.router.Students import ChatStudent as cs
-    from users.router.Advisor import testChatAdvisor as ca
+    from users.router.Advisor import ChatAdvisor as ca
     from users.auth import authUser
 
     monkeypatch.setattr(authUser, "Connect_MongoDB", lambda: mongo_client)
@@ -218,11 +218,11 @@ def test_student_ws_rejected_when_no_active_booking(chat_student_client, mongo_c
     assert exc_info.value.code == status.WS_1008_POLICY_VIOLATION
 
 
-# ── testChatAdvisor.py ────────────────────────────────────────────────────────
+# ── ChatAdvisor.py ────────────────────────────────────────────────────────
 
 @pytest.fixture
 def chat_advisor_app(mongo_client, monkeypatch):
-    from users.router.Advisor import testChatAdvisor as ca
+    from users.router.Advisor import ChatAdvisor as ca
     from users.auth import authUser
 
     monkeypatch.setattr(authUser, "Connect_MongoDB", lambda: mongo_client)
@@ -303,7 +303,7 @@ def test_advisor_ws_rejected_when_no_matching_booking(chat_advisor_client, mongo
 @pytest.fixture
 def combined_chat_app(mongo_client, monkeypatch):
     from users.router.Students import ChatStudent as cs
-    from users.router.Advisor import testChatAdvisor as ca
+    from users.router.Advisor import ChatAdvisor as ca
     from users.auth import authUser
 
     monkeypatch.setattr(authUser, "Connect_MongoDB", lambda: mongo_client)

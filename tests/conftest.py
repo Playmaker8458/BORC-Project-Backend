@@ -24,6 +24,10 @@ os.environ.setdefault("ENV", "test")
 
 import pytest
 import mongomock
+from mongomock.gridfs import enable_gridfs_integration
+
+# ไฟล์แนบเก็บใน GridFS (common/attachments.py) — ทำให้ gridfs.GridFS ใช้กับ mongomock ได้ในชุดทดสอบ
+enable_gridfs_integration()
 
 
 @pytest.fixture

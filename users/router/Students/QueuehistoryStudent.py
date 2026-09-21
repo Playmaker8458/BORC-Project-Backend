@@ -43,8 +43,15 @@ def get_all_queue_history(request: Request):
                 {"$or": [{"rescheduledById": user_id}, {"studentId": user_id}]}
             )),
             lambda: list(db["CancelBookingHistory"].find({"cancelledById": user_id})),
+            # Completed (อาจารย์ปิด/ระบบปิด) + คิวที่ระบบยกเลิกอัตโนมัติ (role=System) — เหตุการณ์หลังนี้บันทึกใน
+            # CancelBookingHistory ด้วย cancelledById="system" ซึ่งไม่ตรงกับ id นักศึกษา จึงต้องดึงจากที่นี่
+            # (ยกเลิกโดยผู้ใช้/อาจารย์อยู่ใน CancelBookingHistory ของนักศึกษาแล้ว ไม่ดึงซ้ำเพื่อไม่ให้รายการเบิ้ล)
             lambda: list(db["QueueManagementHistory"].find(
-                {"userId": user_id, "status": "Completed"}, {"_id": 0}
+                {"userId": user_id, "$or": [
+                    {"status": "Completed"},
+                    {"role": "System", "status": "Cancelled"},
+                ]},
+                {"_id": 0},
             )),
         )
 

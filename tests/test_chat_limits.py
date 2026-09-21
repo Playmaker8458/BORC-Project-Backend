@@ -109,7 +109,7 @@ def test_limiter_does_not_grow_unbounded_for_idle_keys():
 
 @pytest.fixture
 def chat(mongo_client, monkeypatch):
-    from users.router.Advisor import testChatAdvisor as ca
+    from users.router.Advisor import ChatAdvisor as ca
     from users.router.Students import ChatStudent as cs
     from users.auth import authUser
 

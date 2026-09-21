@@ -1,16 +1,25 @@
 import logging
-
-logger = logging.getLogger(__name__)
 from fastapi import APIRouter, HTTPException, Request, UploadFile, File, Form, Depends, BackgroundTasks
 from ...Database.ConnectDB import Connect_MongoDB
 from users.auth.authUser import verify_user_token, get_user_id
-from datetime import datetime, timezone, timedelta
-from pymongo import ASCENDING, DESCENDING
+from datetime import datetime, timezone
 import requests as req
 from dotenv import load_dotenv
 from pymongo.errors import DuplicateKeyError
-from common.slot_service import get_now_utc7, is_within_cutoff, recalculate_slot_booked, CUTOFF_HOURS
-from common.notify import CHATBOT_INTERNAL_HEADERS, CHATBOT_URL, notify_chatbot
+from common.booking_status import ACTIVE_STATUSES
+from common.slot_service import (
+    cutoff_datetime,
+    get_now_utc7,
+    has_bookable_slot,
+    recalculate_slot_booked,
+    slot_is_taken,
+    unavailable_advisor_ids,
+    validate_date_or_400,
+)
+from common.attachments import Attachment, content_matches_type, delete_attachments, store_attachment
+from common.notify import CHATBOT_INTERNAL_HEADERS, CHATBOT_URL
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -24,19 +33,6 @@ ALLOWED_TYPES = [
     "application/msword",
 ]
 MAX_SIZE_BYTES = 10 * 1024 * 1024  # 10 MB
-
-# Status groups (SLOT_BLOCKING_STATUSES/CUTOFF_HOURS มาจาก common.slot_service
-# เพื่อให้ทุกไฟล์ที่ sync slot ใช้ค่าเดียวกัน)
-ACTIVE_STATUSES = ["Pending", "Approved", "InProgress", "Rescheduled"]
-# นักศึกษามีนัดที่ยังใช้งานอยู่ได้เพียงหนึ่งรายการ ห้ามเขียนทับนัดที่
-# Approved/Rescheduled เพราะนัดเดิมจะหายไปโดยไม่ถูกยกเลิกหรือบันทึกประวัติ
-BLOCK_BOOKING_STATUSES  = ACTIVE_STATUSES
-UPDATE_BOOKING_STATUSES = ["Approved", "Rescheduled"]
-
-# Auto-update config
-# Background worker ตรวจทุก 30 วินาที จึงเปลี่ยนสถานะใกล้เวลาจริงได้
-AUTO_UPDATE_INTERVAL_SEC = 30
-
 
 # ─── Form model ───────────────────────────────────────────────────────────────
 class BookingForm:
@@ -62,46 +58,6 @@ def get_db():
     return Connect_MongoDB()["BORC"]
 
 
-def ensure_booking_indexes(db):
-    """สร้าง index ครั้งเดียวตอน startup หรือเรียกจาก lifespan"""
-    col = db["BookingOnline"]
-    col.create_index([("UserId",    ASCENDING), ("Status", ASCENDING)])
-    col.create_index([("Status",    ASCENDING), ("Date",   ASCENDING)])
-    col.create_index([("AdvisorId", ASCENDING), ("Date",   ASCENDING), ("Status", ASCENDING)])
-    
-    col.create_index([("UserId", ASCENDING), ("CreatedAt", DESCENDING)])
-
-    # index สำหรับ query ที่ยิงบ่อย: verify_user_token ค้น UserProfile ด้วย userId ทุก request
-    # (ก่อนหน้านี้ไม่มี index จึงเป็น collection scan) และ history ที่ค้นด้วย id ของผู้ใช้/คิว
-    db["UserProfile"].create_index([("userId", ASCENDING)])
-    db["RescheduleHistory"].create_index([("bookingId", ASCENDING), ("rescheduledById", ASCENDING)])
-    db["RescheduleHistory"].create_index([("studentId", ASCENDING)])
-    # หน้าจัดการคิวของอาจารย์ค้นประวัติเลื่อนคิวด้วย rescheduledById + rescheduledByRole (รันพร้อมกับการดึงคิว)
-    db["RescheduleHistory"].create_index([("rescheduledById", ASCENDING), ("rescheduledByRole", ASCENDING)])
-    db["ApprovedHistory"].create_index([("UserId", ASCENDING)])
-    db["CancelBookingHistory"].create_index([("cancelledById", ASCENDING)])
-    db["QueueManagementHistory"].create_index([("userId", ASCENDING), ("status", ASCENDING)])
-    # AdvisorStats นับด้วย AdvisorId / advisorName
-    db["ApprovedHistory"].create_index([("AdvisorId", ASCENDING), ("Status", ASCENDING)])
-    db["RescheduleHistory"].create_index([("advisorName", ASCENDING)])
-    db["CancelBookingHistory"].create_index([("advisorName", ASCENDING)])
-
-    lock_col = db["_AutoUpdateLock"]
-    
-    # ─── แก้ไขตรงส่วนนี้ ───
-    try:
-        lock_col.create_index([("key", ASCENDING)], unique=True, name="auto_update_key_unique")
-    except DuplicateKeyError:
-        # หากมีข้อมูล key: "auto_update" ซ้ำกันอยู่ ให้ลบข้อมูลใน _AutoUpdateLock ทิ้ง
-        lock_col.delete_many({}) 
-        # แล้วลองสร้าง Index ใหม่อีกครั้ง
-        lock_col.create_index([("key", ASCENDING)], unique=True, name="auto_update_key_unique")
-        
-    lock_col.update_one(
-        {"key": "auto_update"},
-        {"$setOnInsert": {"lastRun": datetime(1970, 1, 1, tzinfo=timezone.utc)}},
-        upsert=True,
-    )
 
 
 # ─── Slot helpers ─────────────────────────────────────────────────────────────
@@ -121,204 +77,6 @@ def find_slot_doc_for_date(db, advisor_id: str, date: str):
     })
 
 
-def save_auto_queue_history(db, booking: dict, status: str, reason: str, now_utc: datetime):
-    """ให้ทั้งนักศึกษาและอาจารย์เห็นรายการที่ระบบเปลี่ยนสถานะอัตโนมัติ."""
-    events = [
-        (booking.get("AdvisorId", ""), booking.get("StudentName", "")),
-        (booking.get("UserId", ""), booking.get("Advisor_Name", "")),
-    ]
-    for user_id, user_name in events:
-        if user_id:
-            db["QueueManagementHistory"].insert_one({
-                "userId"    : user_id,
-                "role"      : "System",
-                "UserName"  : user_name,
-                "status"    : status,
-                "Reason"    : reason,
-                "createdAt" : now_utc,
-                "updatedAt" : now_utc,
-            })
-
-
-# ─── Auto update status ───────────────────────────────────────────────────────
-def auto_update_status(db):
-    """
-    เรียกได้ทั้งจาก request และ background worker
-    ใช้ Distributed Lock ใน MongoDB เพื่อให้รันจริงเพียง process เดียวในแต่ละรอบ
-    """
-    col_lock = db["_AutoUpdateLock"]
-    now_utc  = datetime.now(timezone.utc)
-    # รองรับกรณี worker เชื่อมต่อฐานข้อมูลได้ภายหลัง startup
-    col_lock.update_one(
-        {"key": "auto_update"},
-        {"$setOnInsert": {"lastRun": datetime(1970, 1, 1, tzinfo=timezone.utc)}},
-        upsert=True,
-    )
-
-    lock_result = col_lock.update_one(
-        {
-            "key": "auto_update",
-            "lastRun": {"$lt": now_utc - timedelta(seconds=AUTO_UPDATE_INTERVAL_SEC)},
-        },
-        {"$set": {"lastRun": now_utc}},
-    )
-    if lock_result.modified_count == 0:
-        return  # มี process อื่นรันอยู่แล้ว
-
-    _do_auto_update(db, now_utc)
-
-
-def _do_auto_update(db, now_utc: datetime):
-    tz_utc7  = timezone(timedelta(hours=7))
-    now_utc7 = now_utc.astimezone(tz_utc7)
-    col      = db["BookingOnline"]
-
-    # หมายเหตุ: ไม่รวม "Rescheduled" — ต้องรอให้อาจารย์ Approve รอบใหม่ก่อน
-    # ระบบจะไม่ดัน Rescheduled → InProgress โดยอัตโนมัติ แต่จะ Cancel ถ้าหมดเวลา
-    bookings = list(col.find({
-        "Status": {"$in": ["Pending", "Approved", "InProgress", "Rescheduled"]}
-    }))
-
-    for booking in bookings:
-        try:
-            _process_booking_status(db, col, booking, now_utc, now_utc7, tz_utc7)
-        except Exception as exc:
-            logger.warning(f"[WARN] auto status update failed for booking {booking.get('_id')}: {exc}")
-            continue
-
-
-def _process_booking_status(db, col, booking, now_utc, now_utc7, tz_utc7):
-    """
-    กฎการเปลี่ยน Status อัตโนมัติ:
-      Pending/Rescheduled + ก่อนเวลาเริ่ม 1 ชั่วโมง (ยังไม่ Approve) → Cancelled
-      Approved   + ถึงเวลาเริ่ม  → InProgress
-      InProgress + เลยเวลาสิ้นสุด  → Completed
-    """
-    date_str   = booking.get("Date", "")
-    time_str   = booking.get("Time", "")
-    status     = booking.get("Status", "")
-    advisor_id = booking.get("AdvisorId", "")
-
-    if not date_str or not time_str or "-" not in time_str:
-        return
-
-    start = time_str.split("-")[0].strip()
-    end   = time_str.split("-")[1].strip()
-
-    try:
-        start_dt = datetime.strptime(f"{date_str} {start}", "%Y-%m-%d %H:%M").replace(tzinfo=tz_utc7)
-        end_dt   = datetime.strptime(f"{date_str} {end}",   "%Y-%m-%d %H:%M").replace(tzinfo=tz_utc7)
-    except ValueError:
-        return
-
-    # ─── ยังไม่อนุมัติเมื่อเข้าสู่ช่วงก่อนนัด 1 ชั่วโมง → Cancelled ───────────────────────
-    # ใช้ filter สถานะซ้ำอีกครั้ง เพื่อไม่ทับการกดอนุมัติที่เกิดพร้อมกัน
-    approval_deadline = start_dt - timedelta(hours=CUTOFF_HOURS)
-    if status in ("Pending", "Rescheduled") and now_utc7 >= approval_deadline:
-        cancelled = col.update_one(
-            {"_id": booking["_id"], "Status": {"$in": ["Pending", "Rescheduled"]}},
-            {"$set": {"Status": "Cancelled", "UpdatedAt": now_utc}}
-        )
-        if cancelled.modified_count:
-            db["CancelBookingHistory"].insert_one({
-                "cancelledById"  : "system",
-                "cancelledByRole": "System",
-                "advisorName"    : booking.get("Advisor_Name", ""),
-                "studentName"    : booking.get("StudentName", ""),
-                "cancelledDate"  : date_str,
-                "cancelReason"   : "อาจารย์ไม่ได้ยืนยันคิวก่อนถึงเวลานัด 1 ชั่วโมง",
-                "status"         : "Cancelled",
-                "createdAt"      : now_utc,
-                "updatedAt"      : now_utc,
-            })
-            save_auto_queue_history(
-                db,
-                booking,
-                "Cancelled",
-                "อาจารย์ไม่ได้ยืนยันคิวก่อนถึงเวลานัด 1 ชั่วโมง",
-                now_utc,
-            )
-            recalculate_slot_booked(db, advisor_id, date_str, start, end)
-            # แจ้งเตือนนักศึกษาว่าคิวถูกระบบยกเลิกอัตโนมัติ (เดิมไม่มีการแจ้งเตือนเลย
-            # ทำให้นักศึกษาไม่รู้ว่าคิวถูกยกเลิกจนกว่าจะเปิดแอปเอง)
-            notify_chatbot(f"{chatbot_uri}/NotifyQueueStudent/NotifyStudent", {
-                "userId"      : booking.get("UserId", ""),
-                "StudentName" : booking.get("StudentName", ""),
-                "AdvisorName" : booking.get("Advisor_Name", ""),
-                "Date"        : date_str,
-                "Time"        : time_str,
-                "Status"      : "Cancelled",
-            }, CHATBOT_INTERNAL_HEADERS)
-        return
-
-    # ─── Approved + ถึงเวลาเริ่ม → InProgress ───────────────────────────────
-    # (Rescheduled ไม่รวม — ต้องให้อาจารย์ Approve รอบใหม่ก่อนเสมอ)
-    if status == "Approved" and now_utc7 >= start_dt:
-        started = col.update_one(
-            {"_id": booking["_id"], "Status": "Approved"},
-            {"$set": {"Status": "InProgress", "UpdatedAt": now_utc}}
-        )
-        if started.modified_count:
-            recalculate_slot_booked(db, advisor_id, date_str, start, end)
-        return
-
-    # ─── InProgress + เลยเวลาสิ้นสุด → Completed ───────────────────────────
-    if status == "InProgress" and now_utc7 >= end_dt:
-        completed = col.update_one(
-            {"_id": booking["_id"], "Status": "InProgress"},
-            {"$set": {
-                "Status"     : "Completed",
-                "CompletedAt": now_utc,
-                "UpdatedAt"  : now_utc,
-            }}
-        )
-        if completed.modified_count:
-            save_auto_queue_history(
-                db,
-                booking,
-                "Completed",
-                "ระบบปิดการให้คำปรึกษาอัตโนมัติเมื่อสิ้นสุดเวลานัด",
-                now_utc,
-            )
-            recalculate_slot_booked(db, advisor_id, date_str, start, end)
-
-
-
-# ─── กฎ "slot จองได้หรือไม่" (ใช้ร่วมกันโดย AvailableAdvisors / AvailableSlots) ───────────
-def _slot_is_taken(slot: dict) -> bool:
-    """slot ถูกล็อก ปิด หรือเต็มแล้ว (จองไม่ได้)"""
-    return (
-        slot.get("isLocked", False)
-        or slot.get("is_closed", False)
-        or slot.get("booked", 0) >= slot.get("max_booking", 1)
-    )
-
-
-def _cutoff_datetime(date: str, start: str) -> datetime | None:
-    """เวลาปิดรับจอง = เวลาเริ่ม - CUTOFF_HOURS (UTC+7); None ถ้าเวลาเริ่มผิดรูปแบบ"""
-    try:
-        start_dt = datetime.strptime(f"{date} {start}", "%Y-%m-%d %H:%M").replace(tzinfo=timezone(timedelta(hours=7)))
-    except ValueError:
-        return None
-    return start_dt - timedelta(hours=CUTOFF_HOURS)
-
-
-def _has_bookable_slot(slots: list, date: str, today: str, now: datetime) -> bool:
-    """มี slot ที่จองได้อย่างน้อย 1 ช่วง — ถ้าเป็นวันนี้ ต้องยังไม่เลยเวลา cutoff
-
-    (เวลาเริ่มที่ผิดรูปแบบของวันนี้ ไม่ถูกนับว่าว่าง: พฤติกรรมเดิมของรายชื่ออาจารย์)
-    """
-    for s in slots:
-        if _slot_is_taken(s):
-            continue
-        if date != today:
-            return True
-        cutoff = _cutoff_datetime(date, s["start"])
-        if cutoff is not None and now < cutoff:
-            return True
-    return False
-
-
 def _slot_view(s: dict, date: str, today: str, now: datetime) -> dict:
     """รูปแบบ slot ที่ส่งให้หน้าจอง พร้อมสถานะปิด/เต็ม/เลยเวลา
 
@@ -326,13 +84,13 @@ def _slot_view(s: dict, date: str, today: str, now: datetime) -> dict:
     """
     is_past = False
     if date == today:
-        cutoff = _cutoff_datetime(date, s["start"])
+        cutoff = cutoff_datetime(date, s["start"])
         is_past = cutoff is not None and now >= cutoff
     return {
         "start"    : s["start"],
         "end"      : s["end"],
         "label"    : s.get("label", ""),
-        "is_closed": _slot_is_taken(s) or is_past,
+        "is_closed": slot_is_taken(s) or is_past,
         "is_past"  : is_past,
         "is_booked": s.get("isLocked", False) or s.get("booked", 0) >= s.get("max_booking", 1),
     }
@@ -352,19 +110,20 @@ def get_available_advisors(request: Request):
             {},
             {"_id": 0, "advisor_name": 1, "advisorId": 1, "dates": 1}
         ))
+        blocked = unavailable_advisor_ids(db, (d.get("advisorId", "") for d in all_docs))
 
         advisors: dict = {}
         for doc in all_docs:
             advisor_id = doc.get("advisorId", "")
             name       = doc.get("advisor_name", "")
-            if not advisor_id or not name:
+            if not advisor_id or not name or advisor_id in blocked:
                 continue
 
             entry = advisors.setdefault(advisor_id, {"name": name, "has_available": False})
             if entry["has_available"]:
                 continue
             entry["has_available"] = any(
-                isinstance(slots, list) and date >= today and _has_bookable_slot(slots, date, today, now_utc7)
+                isinstance(slots, list) and date >= today and has_bookable_slot(slots, date, today, now_utc7)
                 for date, slots in doc.get("dates", {}).items()
             )
 
@@ -424,8 +183,8 @@ def _notify_advisor_background(chatbot_url: str, payload: dict):
 
 
 # ─── POST /BookingOnline helpers ──────────────────────────────────────────────
-def _validate_attachment(file: UploadFile | None) -> str | None:
-    """ตรวจไฟล์แนบ (PDF/DOCX ≤ 10MB) คืนชื่อไฟล์ หรือ None ถ้าไม่มีไฟล์"""
+def _validate_attachment(file: UploadFile | None) -> Attachment | None:
+    """ตรวจไฟล์แนบ (PDF/DOC/DOCX ≤ 10MB และเนื้อไฟล์ตรงกับชนิด) คืนไฟล์ หรือ None ถ้าไม่มีไฟล์"""
     if not (file and file.filename):
         return None
     if file.content_type not in ALLOWED_TYPES:
@@ -437,18 +196,29 @@ def _validate_attachment(file: UploadFile | None) -> str | None:
             status_code=400,
             detail=f"ขนาดไฟล์ต้องไม่เกิน 10 MB (ไฟล์นี้ {len(contents)/1024/1024:.2f} MB)"
         )
-    return file.filename
+    if not content_matches_type(file.content_type, contents):
+        raise HTTPException(status_code=400, detail="เนื้อหาไฟล์ไม่ตรงกับชนิดไฟล์ที่ระบุ")
+    return Attachment(filename=file.filename[:255], content_type=file.content_type, contents=contents)
 
 
-def _get_latest_booking_or_block(db, user_id: str) -> tuple[dict | None, str | None]:
-    """คืน (booking ล่าสุด, status) ของผู้ใช้; raise ถ้ายังมีคิวที่ไม่เสร็จสิ้น"""
+def _store_attachment(db, attachment: Attachment | None) -> str | None:
+    """เก็บไฟล์แนบลง GridFS คืน id; ล้มเหลว = 502 (ยังไม่ได้ล็อก slot จึงไม่มีอะไรต้องคืน)"""
+    if attachment is None:
+        return None
+    try:
+        return store_attachment(db, attachment)
+    except Exception:
+        logger.exception("บันทึกไฟล์แนบไม่สำเร็จ")
+        raise HTTPException(status_code=502, detail="บันทึกไฟล์แนบไม่สำเร็จ กรุณาลองใหม่อีกครั้ง")
+
+
+def _ensure_no_active_booking(db, user_id: str) -> None:
+    """raise 400 ถ้าคิวล่าสุดของผู้ใช้ยังไม่เสร็จสิ้น (นักศึกษามีคิวที่ใช้งานอยู่ได้ทีละ 1 คิว)"""
     latest_booking = db["BookingOnline"].find_one(
         {"UserId": user_id},
         sort=[("CreatedAt", -1)]
     )
-    latest_status = latest_booking.get("Status", "") if latest_booking else None
-
-    if latest_status in BLOCK_BOOKING_STATUSES:
+    if latest_booking and latest_booking.get("Status") in ACTIVE_STATUSES:
         raise HTTPException(
             status_code=400,
             detail=(
@@ -456,11 +226,11 @@ def _get_latest_booking_or_block(db, user_id: str) -> tuple[dict | None, str | N
                 f"(วันที่ {latest_booking['Date']} เวลา {latest_booking['Time']})"
             ),
         )
-    return latest_booking, latest_status
 
 
 def _find_bookable_slot(db, data) -> tuple[dict, str, str, str]:
     """ตรวจวันที่/เวลา/slot ที่เลือก คืน (slot_doc, start, end, advisor_name); raise ถ้าจองไม่ได้"""
+    validate_date_or_400(data.date)
     min_date = get_now_utc7().strftime("%Y-%m-%d")
     if data.date < min_date:
         raise HTTPException(
@@ -468,19 +238,18 @@ def _find_bookable_slot(db, data) -> tuple[dict, str, str, str]:
             detail=f"กรุณาเลือกวันนี้ ({min_date}) หรือหลังจากนั้น"
         )
 
+    if data.advisor_id in unavailable_advisor_ids(db, [data.advisor_id]):
+        raise HTTPException(status_code=404, detail="ไม่พบข้อมูลอาจารย์")
+
     slot_doc = find_slot_doc_for_date(db, data.advisor_id, data.date)
     if not slot_doc:
         raise HTTPException(status_code=404, detail="ไม่พบช่วงเวลาของอาจารย์ในวันที่เลือก")
 
     start, end = parse_time_range(data.time)
 
-    try:
-        start_dt = datetime.strptime(f"{data.date} {start}", "%Y-%m-%d %H:%M").replace(tzinfo=timezone(timedelta(hours=7)))
-        cutoff_dt = start_dt - timedelta(hours=CUTOFF_HOURS)
-        if get_now_utc7() >= cutoff_dt:
-            raise HTTPException(status_code=400, detail="ไม่สามารถจองได้ เนื่องจากต้องจองล่วงหน้าอย่างน้อย 1 ชั่วโมง หรือช่วงเวลานี้ผ่านไปแล้ว")
-    except ValueError:
-        pass
+    cutoff = cutoff_datetime(data.date, start)  # None = เวลาเริ่มผิดรูปแบบ → ข้ามการเช็ก (พฤติกรรมเดิม)
+    if cutoff is not None and get_now_utc7() >= cutoff:
+        raise HTTPException(status_code=400, detail="ไม่สามารถจองได้ เนื่องจากต้องจองล่วงหน้าอย่างน้อย 1 ชั่วโมง หรือช่วงเวลานี้ผ่านไปแล้ว")
 
     slot_list   = slot_doc.get("dates", {}).get(data.date, [])
     target_slot = next(
@@ -489,11 +258,7 @@ def _find_bookable_slot(db, data) -> tuple[dict, str, str, str]:
     if not target_slot:
         raise HTTPException(status_code=404, detail="ไม่พบช่วงเวลาที่เลือก")
 
-    if (
-        target_slot.get("isLocked", False)
-        or target_slot.get("is_closed", False)
-        or target_slot.get("booked", 0) >= target_slot.get("max_booking", 1)
-    ):
+    if slot_is_taken(target_slot):
         raise HTTPException(status_code=400, detail="ช่วงเวลานี้ถูกจองแล้ว กรุณาเลือกช่วงเวลาอื่น")
 
     # ใช้ชื่อจากตารางของอาจารย์เสมอ ไม่เชื่อชื่อที่ส่งมาจาก browser
@@ -541,21 +306,13 @@ def _get_student_name(db, user_id: str) -> str:
     )
 
 
-def _save_booking(db, booking_payload: dict, latest_booking: dict | None, latest_status: str | None) -> None:
-    """Approved/Rescheduled → update document เดิม; Cancelled / Completed / ใหม่ → insert ใหม่เสมอ"""
-    is_fresh = latest_status in (None, "Cancelled", "Completed")
-    booking_to_update = (
-        None if is_fresh
-        else (latest_booking if latest_status in UPDATE_BOOKING_STATUSES else None)
-    )
+def _save_booking(db, booking_payload: dict) -> None:
+    """คิวใหม่เป็นเอกสารใหม่เสมอ (คิวเก่าที่ Cancelled/Completed เก็บไว้เป็นประวัติ)
 
-    if booking_to_update is not None:
-        db["BookingOnline"].update_one(
-            {"_id": booking_to_update["_id"]},
-            {"$set": booking_payload}
-        )
-    else:
-        db["BookingOnline"].insert_one(booking_payload)
+    เดิมมีกิ่ง "update เอกสารเดิมถ้า Approved/Rescheduled" แต่ไปไม่ถึงเลย: _ensure_no_active_booking
+    ปฏิเสธคิวที่ยัง active (รวมสองสถานะนี้) ตั้งแต่ก่อนถึงขั้นนี้
+    """
+    db["BookingOnline"].insert_one(booking_payload)
 
 
 # ─── POST /BookingOnline ──────────────────────────────────────────────────────
@@ -576,39 +333,58 @@ def create_booking(
         payload = verify_user_token(request)
         user_id = get_user_id(payload)
 
-        file_path = _validate_attachment(file)
+        attachment = _validate_attachment(file)
 
         db = get_db()
-        auto_update_status(db)
+        # ไม่เรียก auto_update_status ตรงนี้: background worker (main.booking_status_worker) ทำทุก 30 วินาทีอยู่แล้ว
+        # เดิมคำขอจองต้องรอสแกนคิวทั้งระบบ + ยิงแจ้งเตือน LINE (timeout 5 วินาทีต่อรายการ) ก่อนได้ตอบ
 
-        latest_booking, latest_status = _get_latest_booking_or_block(db, user_id)
+        _ensure_no_active_booking(db, user_id)
         slot_doc, start, end, advisor_name = _find_bookable_slot(db, data)
-        _lock_slot(db, slot_doc, data.date, start, end)
 
-        student_name = _get_student_name(db, user_id)
+        # เก็บไฟล์ก่อนล็อก slot: การเขียนไฟล์ 10MB ช้ากว่าปกติ ไม่ควรถือ slot ที่ล็อกไว้ระหว่างรอ
+        file_id = _store_attachment(db, attachment)
+        try:
+            _lock_slot(db, slot_doc, data.date, start, end)
 
-        now = datetime.now(timezone.utc)
-        _save_booking(
-            db,
-            {
-                "UserId"                : user_id,
-                "StudentName"           : student_name,
-                "AdvisorId"             : data.advisor_id,
-                "Advisor_Name"          : advisor_name,
-                "Date"                  : data.date,
-                "Time"                  : data.time,
-                "ResearchTopic"         : data.research_topic,
-                "ResearchDetail"        : data.research_detail,
-                "FilePath"              : file_path,
-                "Status"                : "Pending",
-                "RescheduledOnce"       : False,
-                "AdvisorRescheduledOnce": False,
-                "CreatedAt"             : now,
-                "UpdatedAt"             : now,
-            },
-            latest_booking,
-            latest_status,
-        )
+            # หลังล็อก slot แล้ว ถ้าบันทึกคิวไม่สำเร็จต้องคืน slot ไม่งั้นจะล็อกค้างโดยไม่มีคิว
+            try:
+                student_name = _get_student_name(db, user_id)
+
+                now = datetime.now(timezone.utc)
+                _save_booking(
+                    db,
+                    {
+                        "UserId"                : user_id,
+                        "StudentName"           : student_name,
+                        "AdvisorId"             : data.advisor_id,
+                        "Advisor_Name"          : advisor_name,
+                        "Date"                  : data.date,
+                        "Time"                  : data.time,
+                        "ResearchTopic"         : data.research_topic,
+                        "ResearchDetail"        : data.research_detail,
+                        "FilePath"              : attachment.filename if attachment else None,
+                        "FileName"              : attachment.filename if attachment else None,
+                        "FileContentType"       : attachment.content_type if attachment else None,
+                        "FileSize"              : len(attachment.contents) if attachment else None,
+                        "FileId"                : file_id,
+                        "Status"                : "Pending",
+                        "RescheduledOnce"       : False,
+                        "AdvisorRescheduledOnce": False,
+                        "CreatedAt"             : now,
+                        "UpdatedAt"             : now,
+                    },
+                )
+            except Exception as exc:
+                recalculate_slot_booked(db, data.advisor_id, data.date, start, end)
+                if isinstance(exc, DuplicateKeyError):
+                    # มีคำขอจองอีกอันของผู้ใช้เดียวกันสำเร็จตัดหน้า (unique index one_active_booking_per_user)
+                    raise HTTPException(status_code=400, detail="คุณมีการจองที่ยังไม่เสร็จสิ้นอยู่แล้ว")
+                raise
+        except Exception:
+            # จองไม่สำเร็จ (slot ถูกตัดหน้า/บันทึกล้มเหลว): ไฟล์ที่เก็บไปแล้วไม่มีคิวอ้างอิง ลบทิ้ง
+            delete_attachments(db, [file_id])
+            raise
 
         # แจ้งเตือนอาจารย์มีนักศึกษามาจอง (ทำงานใน background ไม่บล็อก response)
         background_tasks.add_task(
@@ -671,44 +447,6 @@ def get_booking_status(request: Request):
                 "Status"       : status,
             } if is_active else None,
         }
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.exception("Unhandled error")
-        raise HTTPException(status_code=500, detail="Internal server error")
-
-
-# ─── POST /SyncAllSlots ───────────────────────────────────────────────────────
-@router.post("/SyncAllSlots")
-def sync_all_slots(request: Request):
-    """
-    [Admin/Advisor only]
-    Force-sync booked count และ isLocked ของทุก slot
-    ใช้เมื่อข้อมูล slot ไม่ตรงกับ booking จริง
-    """
-    try:
-        payload = verify_user_token(request)
-        if payload.get("role") not in ("Admin", "Advisor"):
-            raise HTTPException(status_code=403, detail="ไม่มีสิทธิ์เข้าถึง")
-
-        db        = get_db()
-        col_slots = db["ManageTimeSlots"]
-        updated   = 0
-
-        for doc in col_slots.find({}, {"advisorId": 1, "dates": 1}):
-            advisor_id = doc.get("advisorId", "")
-            for date, slots in doc.get("dates", {}).items():
-                if not isinstance(slots, list):
-                    continue
-                for s in slots:
-                    start = s.get("start", "")
-                    end   = s.get("end",   "")
-                    if start and end:
-                        recalculate_slot_booked(db, advisor_id, date, start, end)
-                        updated += 1
-
-        return {"message": f"Sync เสร็จสิ้น อัปเดต {updated} slots"}
 
     except HTTPException:
         raise

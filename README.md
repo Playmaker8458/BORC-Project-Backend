@@ -11,7 +11,7 @@ Backend API ของระบบ BORC (Booking Online Research Consultation) �
 - **Database**: MongoDB (via `pymongo`)
 - **Auth**: JWT (`python-jose`) — cookie session (users) / bearer token (admin)
 - **Password hashing**: `bcrypt`
-- **File storage**: Cloudinary (รูปโปรไฟล์)
+- **File storage**: MongoDB GridFS (ไฟล์แนบของคิวจอง — ไม่มี URL สาธารณะ ดาวน์โหลดผ่าน backend เฉพาะอาจารย์เจ้าของคิว) และ Cloudinary (รูปโปรไฟล์)
 - **Rate limiting**: `slowapi`
 - **Login ผู้ใช้ทั่วไป**: LINE Login (OAuth 2.0)
 - **Server**: `uvicorn`
@@ -24,9 +24,20 @@ backend/
 ├── requirements.txt
 ├── .env.example
 ├── Dockerfile
-├── common/                     # โค้ดที่ใช้ร่วมกันระหว่าง Admin และ User
+├── common/                     # โค้ดที่ใช้ร่วมกัน (ไม่ผูกกับ HTTP router ตัวใดตัวหนึ่ง)
+│   ├── booking_status.py        #   กลุ่มสถานะคิว (ACTIVE/CANCELLABLE/CHAT ...) — แหล่งเดียว + แผนภาพวงจรชีวิตคิว
+│   ├── booking_worker.py        #   worker เปลี่ยนสถานะคิวอัตโนมัติตามเวลา (Pending→Cancelled, Approved→InProgress→Completed)
+│   ├── slot_service.py          #   กฎ/ตัวช่วยของ slot เวลา: cutoff, ล็อก/ปลด slot, ย้ายคิว, slot ที่จองได้
+│   ├── time_slot_rules.py       #   โมเดลคำขอ + กฎเวลาของช่วงให้คำปรึกษา (ตรวจรูปแบบ, เวลาซ้อนกัน)
+│   ├── indexes.py               #   สร้าง index/unique index ตอน startup
+│   ├── attachments.py           #   ไฟล์แนบของคิว (GridFS): เก็บ/อ่านแบบสตรีม/ลบ, ตรวจเนื้อไฟล์
+│   ├── notify.py                #   ส่งแจ้งเตือนไป ChatBot (LINE)
 │   ├── jwt_utils.py             #   encode/decode JWT กลาง (ใช้โดยทั้ง authAdmin.py และ authUser.py)
-│   └── rate_limit.py            #   slowapi Limiter instance กลาง
+│   ├── cookies.py               #   flag secure/samesite ของคุกกี้ session (ผู้ใช้และแอดมิน)
+│   ├── origin_guard.py          #   ตรวจ Origin กัน CSRF / Cross-site WebSocket
+│   ├── rate_limit.py            #   slowapi Limiter instance กลาง
+│   ├── security_headers.py      #   security headers + ปิด /docs บน production
+│   ├── chat_limits.py, url_safety.py, user_cache.py, queue_history.py, parallel.py, mongodb_atlas.py
 ├── Admin/
 │   ├── auth/authAdmin.py        # login แอดมิน + verify_token/require_admin
 │   ├── Database/ConnectDB.py    # เชื่อมต่อ MongoDB (ฝั่ง Admin)

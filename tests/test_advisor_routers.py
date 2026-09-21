@@ -4,7 +4,7 @@ Endpoint coverage สำหรับ Advisor routers ที่ก่อนหน
 - ManageQueueAdvisor.py     (AdvisorQueues, ConfirmQueue, AdvisorCancelQueue, CompleteQueue)
 - ManageTimeSlots.py        (TimeSlots, SaveTimeSlots, UpdateTimeSlots, DeleteTimeSlots)
 - QueuehistoryAdvisor.py    (All)
-- Rechedule_Advisor.py      (BookingInfo, AvailableSlots, RescheduleBooking)
+- Reschedule_Advisor.py      (BookingInfo, AvailableSlots, RescheduleBooking)
 - Show_Consult.py           (TodayQueue, AdvisorStats)
 - ConsultationAvailability.py (GetDaySlots, SaveDaySchedule)
 """
@@ -12,6 +12,7 @@ Endpoint coverage สำหรับ Advisor routers ที่ก่อนหน
 from datetime import datetime, timedelta, timezone
 
 import pytest
+import requests
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -70,7 +71,6 @@ def mqa_app(mongo_client, monkeypatch):
 
     monkeypatch.setattr(authUser, "Connect_MongoDB", lambda: mongo_client)
     monkeypatch.setattr(mqa, "Connect_MongoDB", lambda: mongo_client)
-    monkeypatch.setattr(mqa, "auto_update_status", lambda db: None)
 
     app = FastAPI()
     app.include_router(mqa.router)
@@ -147,7 +147,7 @@ def test_advisor_cancel_queue_success(mqa_client, mongo_client):
 
 def test_complete_queue_success(mqa_client, mongo_client):
     _seed_user(mongo_client, "advisor-1")
-    _insert_booking(mongo_client, AdvisorId="advisor-1", Status="Approved")
+    _insert_booking(mongo_client, AdvisorId="advisor-1", Status="InProgress")
 
     resp = mqa_client.patch("/CompleteQueue", json={"user_id": "student-1"}, cookies=_cookies("advisor-1"))
 
@@ -404,11 +404,11 @@ def test_advisor_history_returns_only_own_records(qha_client, mongo_client):
     assert data[0]["status"] == "Approved"
 
 
-# ── Rechedule_Advisor ────────────────────────────────────────────────────────────
+# ── Reschedule_Advisor ────────────────────────────────────────────────────────────
 
 @pytest.fixture
 def ra_app(mongo_client, monkeypatch):
-    from users.router.Advisor import Rechedule_Advisor as ra
+    from users.router.Advisor import Reschedule_Advisor as ra
     from users.auth import authUser
 
     monkeypatch.setattr(authUser, "Connect_MongoDB", lambda: mongo_client)
@@ -462,12 +462,17 @@ def test_reschedule_booking_success(ra_client, mongo_client, monkeypatch):
     _seed_user(mongo_client, "advisor-1")
     _insert_booking(mongo_client, AdvisorId="advisor-1", Status="Approved", AdvisorRescheduledOnce=False, Date="2099-01-01", Time="09:00-10:00")
 
+    mongo_client["BORC"]["ManageTimeSlots"].insert_one({
+        "advisorId": "advisor-1",
+        "dates": {"2099-02-01": [{"start": "10:00", "end": "11:00", "max_booking": 1, "booked": 0,
+                                  "isLocked": False, "is_closed": False}]},
+    })
+
     class _FakeResp:
         def json(self):
             return {"ok": True}
 
-    from users.router.Advisor import Rechedule_Advisor as ra_module
-    monkeypatch.setattr(ra_module.http_req, "post", lambda *a, **kw: _FakeResp())
+    monkeypatch.setattr(requests, "post", lambda *a, **kw: _FakeResp())
 
     resp = ra_client.put(
         "/RescheduleBooking",
@@ -479,6 +484,33 @@ def test_reschedule_booking_success(ra_client, mongo_client, monkeypatch):
     booking = mongo_client["BORC"]["BookingOnline"].find_one({"UserId": "student-1"})
     assert booking["Status"] == "Rescheduled"
     assert booking["AdvisorRescheduledOnce"] is True
+
+
+def test_reschedule_booking_rejects_date_without_slot(ra_client, mongo_client):
+    _seed_user(mongo_client, "advisor-1")
+    _insert_booking(mongo_client, AdvisorId="advisor-1", Status="Approved", AdvisorRescheduledOnce=False, Date="2099-01-01", Time="09:00-10:00")
+
+    resp = ra_client.put(
+        "/RescheduleBooking",
+        json={"user_id": "student-1", "new_date": "2099-02-01", "new_start": "10:00", "new_end": "11:00", "reason": "x"},
+        cookies=_cookies("advisor-1"),
+    )
+
+    assert resp.status_code == 404
+    assert mongo_client["BORC"]["BookingOnline"].find_one({"UserId": "student-1"})["Status"] == "Approved"
+
+
+def test_reschedule_booking_rejects_past_or_malformed_date(ra_client, mongo_client):
+    _seed_user(mongo_client, "advisor-1")
+    _insert_booking(mongo_client, AdvisorId="advisor-1", Status="Approved", AdvisorRescheduledOnce=False, Date="2099-01-01", Time="09:00-10:00")
+
+    for bad in ("2020-01-01", "2099-2-1", "not-a-date"):
+        resp = ra_client.put(
+            "/RescheduleBooking",
+            json={"user_id": "student-1", "new_date": bad, "new_start": "10:00", "new_end": "11:00", "reason": "x"},
+            cookies=_cookies("advisor-1"),
+        )
+        assert resp.status_code == 400, bad
 
 
 # ── Show_Consult ─────────────────────────────────────────────────────────────────

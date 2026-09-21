@@ -8,7 +8,7 @@ Step 3 ของการเสริมความปลอดภัย: ส�
 - ไม่ตรวจ URL -> ส่ง javascript:, http:, data: หรือ URL ที่ฝัง user:pass@ (ฟิชชิง) ได้
 
 กฎใหม่:
-- ต้องมี booking ของอาจารย์คนนี้กับนักศึกษาคนนี้ในสถานะเดียวกับที่หน้าแชท/WebSocket ใช้ (ACTIVE_STATUSES)
+- ต้องมี booking ของอาจารย์คนนี้กับนักศึกษาคนนี้ในสถานะเดียวกับที่หน้าแชท/WebSocket ใช้ (CHAT_STATUSES)
 - ลิงก์ต้องเป็น https ที่มี hostname ASCII, ไม่มี user:pass@, ไม่มีช่องว่าง/อักขระควบคุม, ยาว ≤ 2048
 - (ทางเลือก) env CHAT_LINK_ALLOWED_HOSTS จำกัดโดเมน (ต่อท้ายตรงขอบจุด); ค่าเริ่มต้น = ไม่จำกัดโดเมน
 """
@@ -82,7 +82,7 @@ def test_validate_host_allowlist_matches_on_label_boundary():
 
 @pytest.fixture
 def ctx(mongo_client, monkeypatch):
-    from users.router.Advisor import testChatAdvisor as ca
+    from users.router.Advisor import ChatAdvisor as ca
     from users.auth import authUser
 
     outbound = []

@@ -2,14 +2,15 @@ import logging
 
 logger = logging.getLogger(__name__)
 import bcrypt
-from fastapi import APIRouter, HTTPException, status, Depends
+from fastapi import APIRouter, HTTPException, Request, Response, status, Depends
 from pydantic import BaseModel
 from Admin.Database.ConnectDB import Connect_MongoDB
 from datetime import datetime, timezone
 from bson import ObjectId
-from Admin.auth.authAdmin import verify_token, create_access_token   # ✅ import verify จาก authAdmin
+from Admin.auth.authAdmin import verify_token, create_access_token, set_admin_cookie   # ✅ import verify จาก authAdmin
 
 MIN_PASSWORD_LENGTH = 12
+MAX_PASSWORD_BYTES = 72  # ขีดจำกัดของ bcrypt 5.x
 
 router = APIRouter()
 
@@ -58,6 +59,8 @@ def update_AdminPasswordDB(user_id: str, hashed_password: str) -> bool:
 @router.patch("/ChangePassword")
 def change_password(
     data    : ChangePassword,
+    request : Request,
+    response: Response,
     payload : dict = Depends(verify_token)
 ):
     # ตรวจสอบรหัสผ่านใหม่ตรงกันไหม
@@ -74,6 +77,12 @@ def change_password(
             detail=f"รหัสผ่านต้องมีอย่างน้อย {MIN_PASSWORD_LENGTH} ตัวอักษร"
         )
 
+    if len(data.new_password.encode("utf-8")) > MAX_PASSWORD_BYTES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"รหัสผ่านต้องไม่เกิน {MAX_PASSWORD_BYTES} ไบต์ (ตัวอักษรไทยนับ 3 ไบต์ต่อตัว)"
+        )
+
     if data.new_password == data.current_password:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -86,8 +95,9 @@ def change_password(
         raise HTTPException(status_code=404, detail="ไม่พบข้อมูลผู้ดูแลระบบ")
 
     # ตรวจสอบรหัสผ่านปัจจุบัน
-    if not bcrypt.checkpw(
-        data.current_password.encode("utf-8"),
+    current_bytes = data.current_password.encode("utf-8")
+    if len(current_bytes) > MAX_PASSWORD_BYTES or not bcrypt.checkpw(
+        current_bytes,
         admin["Password"].encode("utf-8")
     ):
         raise HTTPException(
@@ -113,4 +123,5 @@ def change_password(
         "role"    : "Admin",
         "FullName": payload["FullName"],
     })
+    set_admin_cookie(request, response, fresh_token)  # คุกกี้เดิมถูกเพิกถอนแล้ว ออกใหม่ให้ใช้งานต่อได้ทันที
     return {"message": "เปลี่ยนรหัสผ่านสำเร็จ", "access_token": fresh_token}

@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from pydantic import BaseModel
 
 from users.Database.ConnectDB import Connect_MongoDB
+from common.cookies import cookie_security_flags
 from common.jwt_utils import encode_token, decode_token, JWTError
 from common.user_cache import cache_get, cache_put, invalidate_user_cache  # noqa: F401  (re-export)
 from common.rate_limit import limit
@@ -83,33 +84,13 @@ class LineAuthCode(BaseModel):
 # ============================================================
 
 def _cookie_security_flags(request: Request) -> dict:
-    """
-    ตรวจสอบว่า Request มาจาก HTTPS หรือไม่
-
-    Production:
-        secure=True
-        samesite="none"
-
-    Localhost:
-        secure=False
-        samesite="lax"
+    """secure/samesite ของคุกกี้ session — ตัวจริงอยู่ที่ common/cookies.py (ใช้ร่วมกับคุกกี้แอดมิน)
 
     หมายเหตุ: cross-site cookie (SameSite=None) ใช้งานได้เฉพาะบน HTTPS เท่านั้น
-    (ข้อบังคับของเบราว์เซอร์ ไม่ใช่ข้อจำกัดของโค้ดนี้) ถ้า frontend/backend อยู่
-    คนละ domain กันและยังไม่มี HTTPS จริง คุกกี้จะใช้งานข้าม domain ไม่ได้ไม่ว่า
-    จะตั้งค่า flag นี้อย่างไรก็ตาม ต้องแก้ที่ระดับ infra (ทำ HTTPS จริง) หรือ
-    เปลี่ยนสถาปัตยกรรม auth (ย้ายไปใช้ Bearer token แทน cookie สำหรับ
-    Student/Advisor เหมือนที่ Admin ใช้อยู่แล้ว) — ดู README/แชทที่คุยกันไว้.
+    (ข้อบังคับของเบราว์เซอร์ ไม่ใช่ข้อจำกัดของโค้ดนี้)
     """
 
-    forwarded_proto = request.headers.get("x-forwarded-proto", "")
-
-    is_https = request.url.scheme == "https" or forwarded_proto.lower() == "https"
-
-    return {
-        "secure": is_https,
-        "samesite": "none" if is_https else "lax",
-    }
+    return cookie_security_flags(request)
 
 
 # ============================================================

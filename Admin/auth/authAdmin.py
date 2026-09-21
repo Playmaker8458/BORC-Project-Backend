@@ -3,7 +3,7 @@ from datetime import datetime, timedelta, timezone
 
 from dotenv import load_dotenv
 
-from fastapi import APIRouter, HTTPException, Depends, Request
+from fastapi import APIRouter, HTTPException, Depends, Request, Response
 from fastapi.security import OAuth2PasswordBearer
 from pydantic import BaseModel
 
@@ -11,8 +11,9 @@ from bson import ObjectId
 from bson.errors import InvalidId
 
 from Admin.Database.ConnectDB import Connect_MongoDB
+from common.cookies import cookie_security_flags
 from common.jwt_utils import encode_token, decode_token, JWTError
-from common.rate_limit import limiter, limit
+from common.rate_limit import limit
 import bcrypt
 
 logger = logging.getLogger(__name__)
@@ -25,7 +26,10 @@ ACCESS_TOKEN_EXPIRE_MINUTES =  60 * 24  # 24 ชั่วโมง
 # เข้าถึงตัวแปรในไฟล์ .env เพื่อดึงมาใช้งานในไฟล์ auth.py แบบ local
 load_dotenv()
 
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/authAdmin/Login")
+# session ของแอดมิน: คุกกี้ httpOnly (JavaScript อ่านไม่ได้ — เดิมหน้าเว็บเก็บ token ใน localStorage ซึ่ง XSS ขโมยได้)
+# ยังรับ Authorization: Bearer ด้วยเพื่อ client/สคริปต์เดิม; ถ้ามีทั้งสองอย่าง Bearer มาก่อน
+ADMIN_COOKIE_NAME = "admin_token"
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/authAdmin/Login", auto_error=False)
 
 # MODEL รูปแบบข้อมูลที่ client ต้องส่งมา
 class LoginRequest(BaseModel):
@@ -48,6 +52,7 @@ def create_access_token(data: dict):
 # hash ปลอมไว้เทียบรหัสผ่านตอนไม่พบอีเมล: ให้เวลาตอบเท่ากับกรณีมีอีเมล (กันเดาอีเมลจากเวลาตอบ)
 _DUMMY_HASH = bcrypt.hashpw(b"not-a-real-password", bcrypt.gensalt()).decode("utf-8")
 INVALID_CREDENTIALS_DETAIL = "อีเมลหรือรหัสผ่านไม่ถูกต้อง"
+MAX_PASSWORD_BYTES = 72  # ขีดจำกัดของ bcrypt
 
 
 def _to_epoch(value: datetime) -> float:
@@ -57,8 +62,24 @@ def _to_epoch(value: datetime) -> float:
     return value.timestamp()
 
 
-# ตรวจสอบ Token ว่ามีหรือไม่
-def verify_token(token: str = Depends(oauth2_scheme)):
+def set_admin_cookie(request: Request, response: Response, token: str) -> None:
+    """ตั้งคุกกี้ session แอดมิน (อายุเท่ากับ JWT) — secure/samesite ตามว่าเป็น HTTPS หรือไม่ เหมือนคุกกี้ผู้ใช้"""
+    response.set_cookie(
+        key=ADMIN_COOKIE_NAME,
+        value=token,
+        httponly=True,
+        max_age=ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+        path="/",
+        **cookie_security_flags(request),
+    )
+
+
+# ตรวจสอบ Token ว่ามีหรือไม่ (Authorization: Bearer หรือคุกกี้ admin_token)
+def verify_token(request: Request, bearer: str | None = Depends(oauth2_scheme)):
+    token = bearer or request.cookies.get(ADMIN_COOKIE_NAME)
+    if not token:
+        raise HTTPException(status_code=401, detail="ไม่พบ Token กรุณาเข้าสู่ระบบ")
+
     try:
         payload = decode_token(token)
         email   = payload.get("sub")
@@ -119,7 +140,7 @@ def getAdminByIdDB(admin_id: str) -> dict | None:
 # Login มีหน้าที่ตรวจสอบ Email, Password ว่าตรงกับฐานข้อมูลหรือไม่
 @router.post("/Login")
 @limit("5/minute")
-def login(request: Request, data: LoginRequest):
+def login(request: Request, response: Response, data: LoginRequest):
     if not data.email or not data.password:
         raise HTTPException(status_code=400, detail="ไม่มี Username และ Password กรอกเข้ามา")
 
@@ -130,9 +151,12 @@ def login(request: Request, data: LoginRequest):
         admin = getAdminDB(data)
         hashed_password = admin["Password"] if admin else _DUMMY_HASH
 
-        password_ok = bcrypt.checkpw(
-            data.password.encode("utf-8"),
-            hashed_password.encode("utf-8")
+        password_bytes = data.password.encode("utf-8")
+        # bcrypt 5.x โยน ValueError เมื่อยาวเกิน 72 ไบต์: ถือว่ารหัสผ่านผิด (401) ไม่ใช่ 500
+        # แต่ยังเทียบกับ hash จริง/ปลอมด้วยค่าตัดสั้นเพื่อให้เวลาตอบใกล้เคียงกัน
+        password_ok = (
+            len(password_bytes) <= MAX_PASSWORD_BYTES
+            and bcrypt.checkpw(password_bytes, hashed_password.encode("utf-8"))
         )
         if not admin or not password_ok:
             raise HTTPException(status_code=401, detail=INVALID_CREDENTIALS_DETAIL)
@@ -144,6 +168,9 @@ def login(request: Request, data: LoginRequest):
             "FullName": "ผู้ดูแลระบบ"
         })
 
+        set_admin_cookie(request, response, access_token)
+        # access_token ในตัวตอบยังคงส่งไว้ชั่วคราวเพื่อ client รุ่นเก่า (หน้าเว็บรุ่นใหม่ไม่ใช้/ไม่เก็บ ใช้คุกกี้อย่างเดียว)
+        # เอาออกได้เมื่อไม่มี client รุ่นเก่าเหลือแล้ว
         return {"access_token": access_token}
 
     except HTTPException:
@@ -151,6 +178,13 @@ def login(request: Request, data: LoginRequest):
     except Exception as e:
         logger.exception("Unhandled error")
         raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.post("/Logout")
+def logout(request: Request, response: Response):
+    """ล้างคุกกี้ session แอดมิน (คุกกี้ httpOnly ลบจากหน้าเว็บเองไม่ได้ ต้องให้ backend สั่งลบ) — เรียกซ้ำได้ไม่ error"""
+    response.delete_cookie(key=ADMIN_COOKIE_NAME, httponly=True, path="/", **cookie_security_flags(request))
+    return {"message": "ออกจากระบบสำเร็จ"}
 
 
 #  ตรวจสอบว่า Login อยู่ไหม 

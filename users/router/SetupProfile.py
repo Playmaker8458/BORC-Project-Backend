@@ -4,6 +4,7 @@ logger = logging.getLogger(__name__)
 from fastapi import APIRouter, Depends, HTTPException, Request, status, Response
 from pydantic import BaseModel, field_validator
 from typing import Optional
+from pymongo.errors import DuplicateKeyError
 from users.Database.ConnectDB import Connect_MongoDB
 import os
 from datetime import datetime, timezone
@@ -118,7 +119,14 @@ def AddData_Database(client_data, data: DataProfile):
         "updatedAt"     : now
     }
 
-    result = col.insert_one(new_user)
+    try:
+        result = col.insert_one(new_user)
+    except DuplicateKeyError:
+        # คำขอสมัครซ้ำที่ผ่านการเช็ก find ด้านบนพร้อมกัน (unique index userId ใน common/indexes.py)
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="มีข้อมูลผู้ใช้นี้อยู่ในระบบแล้ว"
+        )
     if not result.inserted_id:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,

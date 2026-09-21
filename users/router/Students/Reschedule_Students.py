@@ -5,8 +5,6 @@ from fastapi import APIRouter, BackgroundTasks, HTTPException, Request, Form, De
 from ...Database.ConnectDB import Connect_MongoDB
 from ...auth.authUser import verify_user_token, get_user_id
 from datetime import datetime, timezone
-import requests as req  # ไม่ได้เรียกตรงนี้แล้ว (ใช้ common.notify แทน) แต่คงไว้เพราะ
-                         # tests/test_security_fixes.py เข้าถึง module.req โดยตรง
 from dotenv import load_dotenv
 from common.slot_service import (
     ensure_slot_open_for_reschedule,
@@ -15,6 +13,7 @@ from common.slot_service import (
     move_booking_to_slot,
     split_time_range,
 )
+from common.booking_status import ACTIVE_STATUSES
 from common.notify import CHATBOT_INTERNAL_HEADERS, CHATBOT_URL, notify_chatbot
 from common.queue_history import log_queue_management_history
 
@@ -23,8 +22,6 @@ router = APIRouter()
 
 load_dotenv(override=True)
 chatbot_uri = CHATBOT_URL
-
-ACTIVE_STATUSES = ["Pending", "Approved", "InProgress", "Rescheduled"]
 
 
 class RescheduleForm:
@@ -173,6 +170,7 @@ def _insert_reschedule_history(db, user_id, booking, data, old_start, old_end, n
         "rescheduledById"  : user_id,
         "rescheduledByRole": "Student",
         "bookingId"        : str(booking["_id"]),
+        "advisorId"        : booking.get("AdvisorId", ""),
         "advisorName"      : booking.get("Advisor_Name", ""),
         "studentName"      : booking.get("StudentName", ""),
         "oldDate"          : booking.get("Date", ""),
@@ -212,12 +210,14 @@ def reschedule_booking(request: Request, background_tasks: BackgroundTasks, data
             ensure_slot_open_for_reschedule(db, advisor_id, data.new_date, data.new_start, data.new_end)
 
         now = datetime.now(timezone.utc)
-        move_booking_to_slot(
+        if not move_booking_to_slot(
             db, booking, advisor_id,
             data.new_date, data.new_start, data.new_end, old_start, old_end,
             extra_fields={"RescheduledOnce": True},
             now=now,
-        )
+        ):
+            raise HTTPException(status_code=409, detail="สถานะคิวเปลี่ยนไปแล้ว กรุณารีเฟรชหน้าแล้วลองใหม่อีกครั้ง")
+
         _insert_reschedule_history(db, user_id, booking, data, old_start, old_end, now)
 
         # แจ้งอาจารย์ว่านักศึกษาเลื่อนคิว (background — ไม่บล็อก event loop)

@@ -6,10 +6,15 @@ from ...Database.ConnectDB import Connect_MongoDB
 from ...auth.authUser import verify_user_token, get_user_id
 from datetime import datetime, timezone
 from pydantic import BaseModel
-from ..Students.BookingOnline import auto_update_status
 from dotenv import load_dotenv
+from common.booking_status import ACTIVE_STATUSES, CANCELLABLE_STATUSES
 from common.notify import CHATBOT_INTERNAL_HEADERS, CHATBOT_URL, notify_chatbot
-from common.slot_service import cancel_booking_and_sync_slot, is_within_advisor_cutoff_window, split_time_range
+from common.slot_service import (
+    is_within_advisor_cutoff_window,
+    mark_booking_cancelled,
+    split_time_range,
+    sync_slot_for_booking,
+)
 from common.parallel import run_parallel
 from common.queue_history import log_queue_management_history
 
@@ -18,13 +23,6 @@ router = APIRouter()
 
 load_dotenv(override=True)
 chatbot_uri = CHATBOT_URL
-
-ACTIVE_STATUSES        = ["Pending", "Approved", "Rescheduled", "InProgress"]
-CANCELLABLE_STATUSES   = ["Pending", "Approved", "Rescheduled"]
-SLOT_BLOCKING_STATUSES = ["Pending", "Approved"]  # ✅ เพิ่มกลับ
-
-CUTOFF_HOURS_BEFORE = 1
-CUTOFF_HOURS_AFTER  = 1
 
 
 class CancelBookingRequest(BaseModel):
@@ -191,14 +189,17 @@ def cancel_booking(request: Request, body: CancelBookingRequest, background_task
 
         now = datetime.now(timezone.utc)
 
-        # ชุดต่อกัน (cancel → sync slot) กับ history 2 รายการ ไม่พึ่งกัน จึงรันพร้อมกัน
+        # เปลี่ยนสถานะก่อนและต้องสำเร็จ (ถ้าสถานะเปลี่ยนไปแล้วห้ามเขียนประวัติ/คืน slot) ส่วน sync slot
+        # กับ history 2 รายการไม่พึ่งกัน จึงรันพร้อมกัน
+        if not mark_booking_cancelled(db, booking, now, {"CancelReason": body.cancelReason.strip()}):
+            raise HTTPException(status_code=409, detail="สถานะคิวเปลี่ยนไปแล้ว กรุณารีเฟรชหน้าแล้วลองใหม่อีกครั้ง")
+
         run_parallel(
-            lambda: cancel_booking_and_sync_slot(
-                db, booking, now, {"CancelReason": body.cancelReason.strip()}
-            ),
+            lambda: sync_slot_for_booking(db, booking),
             lambda: db["CancelBookingHistory"].insert_one({
                 "cancelledById"  : user_id,
                 "cancelledByRole": "Student",
+                "advisorId"      : booking.get("AdvisorId", ""),
                 "advisorName"    : advisor_name,
                 "studentName"    : booking.get("StudentName", ""),
                 "status"         : "Cancelled",

@@ -4,7 +4,7 @@ from fastapi import APIRouter, HTTPException, Request
 from ...Database.ConnectDB import Connect_MongoDB
 from users.auth.authUser import verify_user_token
 
-from common.slot_service import get_today_str
+from common.slot_service import get_now_utc7, get_today_str, has_bookable_slot, unavailable_advisor_ids
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -17,6 +17,7 @@ def get_advisors(request: Request):
     try:
         verify_user_token(request)
         db       = Connect_MongoDB()["BORC"]
+        now      = get_now_utc7()
         today    = get_today_str()
 
         docs = list(db["ManageTimeSlots"].find(
@@ -24,20 +25,23 @@ def get_advisors(request: Request):
             {"_id": 0, "advisorId": 1, "advisor_name": 1, "dates": 1, "months": 1}
         ))
 
+        blocked = unavailable_advisor_ids(db, (d.get("advisorId", "") for d in docs))
+
         result = []
         for doc in docs:
             advisor_id   = doc.get("advisorId", "")
+            if advisor_id in blocked:
+                continue
             advisor_name = doc.get("advisor_name", "")
             months       = doc.get("months", [])
             dates        = doc.get("dates", {})
 
             # นับเฉพาะวันที่ยังไม่ผ่านมา และมี slot ว่างอย่างน้อย 1
+            # กฎเดียวกับหน้าจอง (/booking/AvailableAdvisors): slot ที่เต็ม/ปิด/เลยเวลา cutoff ของวันนี้ไม่นับ
+            # และข้ามข้อมูลที่ไม่ใช่ list (เดิมนับแค่ isLocked/is_closed จึงแสดงอาจารย์ที่จองไม่ได้แล้ว)
             available_dates = [
                 d for d, slots in dates.items()
-                if d >= today and any(
-                    not s.get("isLocked", False) and not s.get("is_closed", False)
-                    for s in slots
-                )
+                if isinstance(slots, list) and d >= today and has_bookable_slot(slots, d, today, now)
             ]
 
             if not available_dates:

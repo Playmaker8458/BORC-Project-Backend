@@ -4,6 +4,10 @@ logger = logging.getLogger(__name__)
 from fastapi import APIRouter, HTTPException
 from Admin.Database.ConnectDB import Connect_MongoDB
 from common.user_cache import invalidate_user_cache
+from common.attachments import delete_attachments
+from common.notify import CHATBOT_INTERNAL_HEADERS, CHATBOT_URL, notify_chatbot
+from common.booking_status import ACTIVE_STATUSES
+from common.slot_service import recalculate_slot_booked, split_time_range
 from bson import ObjectId
 from pydantic import BaseModel
 from datetime import datetime, timezone
@@ -36,6 +40,55 @@ def _save_history(col_history, first_name: str, last_name: str, role: str, statu
         "statusLabel": status_label,
         "createdAt":   datetime.now(timezone.utc),
     })
+
+
+def _attachment_ids(col_booking, booking_filter: dict) -> list:
+    """id ของไฟล์แนบทุกไฟล์ในคิวที่กำลังจะถูกลบ (ต้องดึงก่อนลบ) — ลบบัญชีต้องลบเอกสารวิจัยตามไปด้วย"""
+    return [
+        b["FileId"]
+        for b in col_booking.find({**booking_filter, "FileId": {"$nin": [None, ""]}}, {"FileId": 1})
+    ]
+
+
+def _release_slots(db, bookings: list) -> None:
+    """คืน slot ของ booking ที่ถูกลบไปแล้ว (นับ booking จริงใหม่ → ไม่มีแล้วจึงปลดล็อก)
+
+    ไม่เรียกตอนลบอาจารย์ เพราะ slot ของอาจารย์ถูกลบไปพร้อมกัน
+    """
+    for booking in bookings:
+        start, end = split_time_range(booking.get("Time", ""))
+        date = booking.get("Date", "")
+        if booking.get("AdvisorId") and date and start and end:
+            recalculate_slot_booked(db, booking["AdvisorId"], date, start, end)
+
+
+def _cancel_active_bookings_of_advisor(db, active_bookings: list, advisor_name: str) -> None:
+    """บันทึกประวัติยกเลิกและแจ้งนักศึกษา สำหรับคิวที่ยังใช้งานอยู่ของอาจารย์ที่กำลังถูกลบ
+
+    cancelledById เป็น id ของนักศึกษา (ตามที่อาจารย์ยกเลิกเอง) เพื่อให้หน้าประวัติของนักศึกษาเห็นรายการนี้
+    """
+    now = datetime.now(timezone.utc)
+    for booking in active_bookings:
+        db["CancelBookingHistory"].insert_one({
+            "cancelledById"  : booking.get("UserId", ""),
+            "cancelledByRole": "Admin",
+            "advisorId"      : booking.get("AdvisorId", ""),
+            "advisorName"    : advisor_name,
+            "studentName"    : booking.get("StudentName", ""),
+            "cancelledDate"  : booking.get("Date", ""),
+            "cancelReason"   : "บัญชีอาจารย์ถูกลบโดยผู้ดูแลระบบ",
+            "status"         : "Cancelled",
+            "createdAt"      : now,
+            "updatedAt"      : now,
+        })
+        notify_chatbot(f"{CHATBOT_URL}/NotifyQueueStudent/NotifyStudent", {
+            "userId"      : booking.get("UserId", ""),
+            "StudentName" : booking.get("StudentName", ""),
+            "AdvisorName" : advisor_name,
+            "Date"        : booking.get("Date", ""),
+            "Time"        : booking.get("Time", ""),
+            "Status"      : "Cancelled",
+        }, CHATBOT_INTERNAL_HEADERS)
 
 
 # ─────────────────────────────────────────
@@ -77,7 +130,14 @@ def Delete_AccountUser(client, user_id: str):
 
     # ========== Student ==========
     if role == "Student":
+        # คิวที่ยังใช้งานอยู่ล็อก slot ของอาจารย์ไว้ ต้องคืน slot หลังลบ ไม่งั้นล็อกค้างถาวร
+        active_bookings = list(col_booking.find(
+            {"UserId": booking_user_id, "Status": {"$in": ACTIVE_STATUSES}}
+        ))
+        file_ids = _attachment_ids(col_booking, {"UserId": booking_user_id})
         deleted_booking = col_booking.delete_many({"UserId": booking_user_id})
+        delete_attachments(db, file_ids)
+        _release_slots(db, active_bookings)
         deleted_queue   = col_queue.delete_many({"UserId": booking_user_id})
         deleted_profile = col_profile.delete_one({"_id": object_id})
         invalidate_user_cache(booking_user_id)
@@ -99,8 +159,17 @@ def Delete_AccountUser(client, user_id: str):
         lastname     = user.get("Lastname",  "")
         advisor_name = f"{prefix}{firstname} {lastname}"
 
-        deleted_booking  = col_booking.delete_many({"Advisor_Name": advisor_name})
-        deleted_timeslot = col_timeslot.delete_many({"advisor_name": advisor_name})
+        # อิง id ของอาจารย์ ไม่ใช่ชื่อ: อาจารย์ชื่อซ้ำกันต้องไม่ลบคิว/ช่วงเวลาของอีกคนไปด้วย
+        active_bookings = list(col_booking.find(
+            {"AdvisorId": booking_user_id, "Status": {"$in": ACTIVE_STATUSES}}
+        ))
+        _cancel_active_bookings_of_advisor(db, active_bookings, advisor_name)
+
+        file_ids = _attachment_ids(col_booking, {"AdvisorId": booking_user_id})
+        deleted_booking  = col_booking.delete_many({"AdvisorId": booking_user_id})
+        delete_attachments(db, file_ids)
+        deleted_timeslot = col_timeslot.delete_many({"advisorId": booking_user_id})
+        db["ConsultationAvailability"].delete_many({"advisorId": booking_user_id})
         deleted_profile  = col_profile.delete_one({"_id": object_id})
         invalidate_user_cache(booking_user_id)
 
@@ -169,10 +238,16 @@ def Update_AccountUser(client, body: UpdateUserRequest):
             {"$set": {"Status": body.Status}}
         )
     elif body.Role == "Advisor":
+        # อิง id ของอาจารย์ (ไม่ใช่ชื่อเดิม) และแก้ชื่อใน ManageTimeSlots ด้วย ไม่งั้นนักศึกษาเห็นชื่อเก่า
         col_booking.update_many(
-            {"Advisor_Name": old_name},
+            {"AdvisorId": booking_uid},
             {"$set": {"Advisor_Name": new_name}}
         )
+        db["ManageTimeSlots"].update_many(
+            {"advisorId": booking_uid},
+            {"$set": {"advisor_name": new_name}}
+        )
+        # ManageQueueStudent เป็นข้อมูลเก่าที่ไม่มี AdvisorId จึงยังจับคู่ด้วยชื่อเดิม
         col_queue.update_many(
             {"Advisor_Name": old_name},
             {"$set": {"Advisor_Name": new_name}}
@@ -201,7 +276,7 @@ def ShowAccountUser():
 
 
 @router.delete("/DeleteAccountUser")
-async def DeleteAccountUser(body: DeleteUserRequest):
+def DeleteAccountUser(body: DeleteUserRequest):
     try:
         client = Connect_MongoDB()
         return Delete_AccountUser(client=client, user_id=body.id)
@@ -213,12 +288,40 @@ async def DeleteAccountUser(body: DeleteUserRequest):
 
 
 @router.put("/UpdateAccountUser")
-async def UpdateAccountUser(body: UpdateUserRequest):
+def UpdateAccountUser(body: UpdateUserRequest):
     try:
         client = Connect_MongoDB()
         return Update_AccountUser(client=client, body=body)
     except HTTPException:
         raise
     except Exception as e:
+        logger.exception("Unhandled error")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.post("/SyncAllSlots")
+def SyncAllSlots():
+    """Force-sync booked/isLocked ของทุก slot กับ booking จริง (ใช้เมื่อข้อมูล slot ไม่ตรงกับคิว)
+
+    ย้ายมาจาก /booking/SyncAllSlots ที่เรียกไม่ได้จริง (อยู่ใต้ require_student แต่ตรวจ role Admin/Advisor
+    จึงได้ 403 ทุกคน) — ตอนนี้อยู่ใต้ require_admin ของ router นี้ slot ที่อาจารย์ปิดเองไม่ถูกเปิด
+    """
+    try:
+        db = Connect_MongoDB()["BORC"]
+        updated = 0
+        for doc in db["ManageTimeSlots"].find({}, {"advisorId": 1, "dates": 1}):
+            advisor_id = doc.get("advisorId", "")
+            for date, slots in doc.get("dates", {}).items():
+                if not isinstance(slots, list):
+                    continue
+                for slot in slots:
+                    start, end = slot.get("start", ""), slot.get("end", "")
+                    if start and end:
+                        recalculate_slot_booked(db, advisor_id, date, start, end)
+                        updated += 1
+        return {"message": f"Sync เสร็จสิ้น อัปเดต {updated} slots"}
+    except HTTPException:
+        raise
+    except Exception:
         logger.exception("Unhandled error")
         raise HTTPException(status_code=500, detail="Internal server error")

@@ -6,7 +6,7 @@ import cloudinary
 import cloudinary.uploader
 
 from fastapi import APIRouter, HTTPException, status, Depends, File, UploadFile
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from ..Database.ConnectDB import Connect_MongoDB
 from common.user_cache import invalidate_user_cache
 from datetime import datetime, timezone
@@ -24,10 +24,43 @@ cloudinary.config(
 
 # ─── Models ───────────────────────────────────────────────────────────────────
 
+_MAX_NAME_LEN = 100  # ตรงกับการสมัคร (SetupProfile.py)
+_MAX_IMAGE_SIZE = 5 * 1024 * 1024
+
+# ไบต์แรกของไฟล์รูปจริงแต่ละชนิด — Content-Type ที่ผู้ใช้ส่งมาปลอมได้
+_IMAGE_SIGNATURES = {
+    "image/jpeg": b"\xff\xd8\xff",
+    "image/png": b"\x89PNG\r\n\x1a\n",
+    "image/webp": b"RIFF",  # + "WEBP" ที่ไบต์ 8-11 (ตรวจใน _looks_like_image)
+}
+
+
+def _looks_like_image(content_type: str, contents: bytes) -> bool:
+    signature = _IMAGE_SIGNATURES.get(content_type)
+    if signature is None or not contents.startswith(signature):
+        return False
+    return content_type != "image/webp" or contents[8:12] == b"WEBP"
+
+
 class UpdateProfileName(BaseModel):
     Prefix    : str
     Firstname : str
     Lastname  : str
+
+    @field_validator("Prefix", "Firstname", "Lastname", mode="after")
+    @classmethod
+    def _bounded(cls, value: str) -> str:
+        if len(value) > _MAX_NAME_LEN:
+            raise ValueError(f"ความยาวต้องไม่เกิน {_MAX_NAME_LEN} ตัวอักษร")
+        return value
+
+    @field_validator("Prefix", mode="after")
+    @classmethod
+    def _prefix_not_blank(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("กรุณาเลือกคำนำหน้า")
+        return value
 
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -138,24 +171,30 @@ def update_profile_name(
 
 
 # ✅ PATCH /UpdateProfileImage
+# def ธรรมดา (ไม่ใช่ async): cloudinary.uploader.upload เป็นการเรียกเครือข่ายแบบ blocking — FastAPI จะรัน
+# ใน threadpool แทนที่จะบล็อก event loop ของทุก request (รวม WebSocket แชท) ตลอดการอัปโหลด
 @router.patch("/UpdateProfileImage")
-async def update_profile_image(
+def update_profile_image(
     file    : UploadFile = File(...),
     payload : dict       = Depends(verify_user_token)
 ):
-    ALLOWED_TYPES = ["image/jpeg", "image/png", "image/webp"]
-    if file.content_type not in ALLOWED_TYPES:
+    if file.content_type not in _IMAGE_SIGNATURES:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="รองรับเฉพาะไฟล์ .jpg, .png, .webp เท่านั้น"
         )
 
-    MAX_SIZE = 5 * 1024 * 1024
-    contents = await file.read()
-    if len(contents) > MAX_SIZE:
+    # อ่านเกินขีดจำกัดไม่เกิน 1 ไบต์ก็รู้แล้วว่าใหญ่เกิน — ไม่ต้องโหลดไฟล์ทั้งก้อนเข้าหน่วยความจำก่อนค่อยเช็ก
+    contents = file.file.read(_MAX_IMAGE_SIZE + 1)
+    if len(contents) > _MAX_IMAGE_SIZE:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="ขนาดไฟล์ต้องไม่เกิน 5MB"
+        )
+    if not _looks_like_image(file.content_type, contents):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="เนื้อหาไฟล์ไม่ตรงกับชนิดรูปภาพที่ระบุ"
         )
 
     try:

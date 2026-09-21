@@ -12,6 +12,7 @@ BookingOnline.py ใช้จริงกับ MongoDB) จึงใช้ _Fak
 
 from datetime import datetime, timezone
 
+from common.slot_service import is_within_cutoff
 from users.router.Students import BookingOnline as bo
 
 
@@ -189,8 +190,8 @@ def test_recalculate_slot_booked_missing_doc_returns_none(mongo_client):
 
 
 def test_is_within_cutoff_true_for_past_time():
-    assert bo.is_within_cutoff("2000-01-01", "09:00") is True
+    assert is_within_cutoff("2000-01-01", "09:00") is True
 
 
 def test_is_within_cutoff_false_for_far_future_time():
-    assert bo.is_within_cutoff("2099-12-31", "09:00") is False
+    assert is_within_cutoff("2099-12-31", "09:00") is False

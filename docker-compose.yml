@@ -10,7 +10,13 @@ services:
       - "8000:8000"
 
   cloudflared:
-    image: cloudflare/cloudflared:latest
+    # ⚠️ ค่าเริ่มต้นเป็น quick tunnel (--url ด้านล่าง): ได้ URL *.trycloudflare.com ใหม่ทุกครั้งที่ container เริ่มใหม่
+    # ต้องแก้ Backend_BORC_URL / CORS และ VITE_API_BASE_URL ของ frontend ตามทุกครั้ง — เหมาะกับทดสอบเท่านั้น
+    # ใช้งานจริงให้ใช้ named tunnel (URL ถาวร): สร้าง tunnel ใน Cloudflare Zero Trust แล้วใส่ TUNNEL_TOKEN ใน .env
+    #   → เปลี่ยน command เป็น "tunnel --no-autoupdate run" และเพิ่ม environment: [TUNNEL_TOKEN=${TUNNEL_TOKEN}]
+    # เวอร์ชัน image: ตั้ง CLOUDFLARED_VERSION ใน .env เพื่อ pin (ดูเวอร์ชันที่ github.com/cloudflare/cloudflared/releases)
+    # ถ้าไม่ตั้งจะใช้ latest ซึ่งอาจเปลี่ยนพฤติกรรมเองเมื่อ pull ใหม่
+    image: cloudflare/cloudflared:${CLOUDFLARED_VERSION:-latest}
     container_name: borc-cloudflared
     restart: unless-stopped
     command: tunnel --url http://backend:8000

@@ -8,22 +8,34 @@ from fastapi.exceptions import WebSocketException
 from starlette import status as ws_status
 
 from users.auth.authUser import ensure_user_role, verify_user_token, get_user_id
+from common.booking_status import CHAT_STATUSES
 from common.chat_limits import ChatInvalid, chat_rate_ok, parse_ws_text, WS_POLICY_VIOLATION
 # ⚠️ ปรับ path import ให้ตรงกับตำแหน่งไฟล์ advisor_chat.py จริงในโปรเจกต์
-from ..Advisor.testChatAdvisor import db, ACTIVE_STATUSES, room_connect, room_disconnect, room_broadcast, get_current_user_ws
+from ..Advisor.ChatAdvisor import (
+    db,
+    get_current_user_ws,
+    room_broadcast,
+    room_connect,
+    room_disconnect,
+    room_key,
+)
 
 router = APIRouter()
 
 
 async def resolve_advisor_id_for_student(student_id: str) -> str:
-    """หา advisor_id ของนักศึกษาคนนี้ จาก booking ที่ active อยู่ (token นักศึกษาไม่มี advisor_id ติดมา)
+    """หา advisor_id ของนักศึกษาคนนี้ จาก booking ล่าสุดที่ active (token นักศึกษาไม่มี advisor_id ติดมา)
+
+    เลือกคิวล่าสุด (CreatedAt มากสุด) เพราะนักศึกษาอาจมีคิวเก่าที่ Completed กับอาจารย์คนอื่นค้างอยู่
+    เดิมไม่เรียงลำดับ จึงได้คิวเก่าสุดและแชทไปหาอาจารย์ผิดคน
 
     คืนค่า "" ทั้งสองกรณี (ไม่มี booking active เลย / มี booking แต่ไม่มี AdvisorId)
     เพื่อไม่เปลี่ยนพฤติกรรมเดิมของผู้เรียก แต่กรณีหลัง log เป็น warning เพราะ
     booking ที่ active แล้วไม่มี AdvisorId ถือเป็นข้อมูลผิดปกติ ไม่ใช่เรื่องปกติแบบกรณีแรก
     """
     booking = await db["BookingOnline"].find_one(
-        {"UserId": student_id, "Status": {"$in": ACTIVE_STATUSES}}
+        {"UserId": student_id, "Status": {"$in": CHAT_STATUSES}},
+        sort=[("CreatedAt", -1)],
     )
     if booking is None:
         return ""
@@ -45,7 +57,7 @@ async def get_my_approved_queue(request: Request):
         my_user_id = get_user_id(payload)
  
         bookings = await db["BookingOnline"].find(
-            {"UserId": my_user_id, "Status": {"$in": ACTIVE_STATUSES}}
+            {"UserId": my_user_id, "Status": {"$in": CHAT_STATUSES}}
         ).sort("Date", 1).to_list(length=100)
  
         for b in bookings:
@@ -101,7 +113,8 @@ async def student_chat_ws(
         raise WebSocketException(code=ws_status.WS_1008_POLICY_VIOLATION)
 
     await websocket.accept()
-    room_connect(student_id, websocket)
+    key = room_key(student_id, advisor_id)
+    room_connect(key, websocket)
 
     try:
         while True:
@@ -110,13 +123,13 @@ async def student_chat_ws(
                 text = parse_ws_text(raw)
             except ChatInvalid as exc:
                 # ข้อความใหญ่เกิน/รูปแบบผิด: ปิดการเชื่อมต่อ (หน้าเว็บจำกัดความยาวไว้แล้ว จึงเกิดจากผู้ใช้ที่ผิดปกติเท่านั้น)
-                room_disconnect(student_id, websocket)
+                room_disconnect(key, websocket)
                 await websocket.close(code=exc.code)
                 return
             if text is None:
                 continue
             if not chat_rate_ok(student_id):
-                room_disconnect(student_id, websocket)
+                room_disconnect(key, websocket)
                 await websocket.close(code=WS_POLICY_VIOLATION)
                 return
             now = datetime.now(timezone.utc)
@@ -125,9 +138,9 @@ async def student_chat_ws(
                 "student_id": student_id, "advisor_id": advisor_id,
                 "sender": "student", "type": "text", "text": text, "timestamp": now,
             })
-            await room_broadcast(student_id, {
+            await room_broadcast(key, {
                 "sender": "student", "type": "text", "text": text,
                 "timestamp": now.isoformat().replace("+00:00", "Z"),
             })
     except WebSocketDisconnect:
-        room_disconnect(student_id, websocket)
+        room_disconnect(key, websocket)

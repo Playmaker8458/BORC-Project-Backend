@@ -1,20 +1,20 @@
 """Logic กลางสำหรับ sync สถานะ slot (ManageTimeSlots) กับ booking จริง (BookingOnline)
 
 รวมมาจาก users/router/Students/BookingOnline.py, Reschedule_Students.py,
-Advisor/ManageQueueAdvisor.py, Advisor/Rechedule_Advisor.py ซึ่งแต่ละไฟล์เคย
+Advisor/ManageQueueAdvisor.py, Advisor/Reschedule_Advisor.py ซึ่งแต่ละไฟล์เคย
 มีสำเนาของ logic เดียวกันนี้แยกกัน ทำให้แก้บั๊กที่จุดเดียวไม่ครบทุกที่ได้ง่าย
 """
 
 import logging
+import re
 from datetime import datetime, timedelta, timezone
 
 from fastapi import HTTPException
 
+from common.booking_status import ACTIVE_STATUSES, CANCELLABLE_STATUSES
+
 logger = logging.getLogger(__name__)
 
-# นักศึกษามีนัดที่ยังใช้งานอยู่ได้เพียงหนึ่งรายการ; ใช้เช็คว่า slot ควรถูกล็อกหรือไม่
-ACTIVE_STATUSES = ["Pending", "Approved", "InProgress", "Rescheduled"]
-SLOT_BLOCKING_STATUSES = ACTIVE_STATUSES
 
 # Cutoff แบบ "ก่อนเวลานัดเท่านั้น" — ใช้ตอนนักศึกษาจอง/ยกเลิก/เลื่อนคิว
 CUTOFF_HOURS = 1
@@ -24,6 +24,7 @@ CUTOFF_HOURS_BEFORE = 1
 CUTOFF_HOURS_AFTER = 1
 
 _TZ_UTC7 = timezone(timedelta(hours=7))
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
 def is_within_cutoff(date_str: str, start_time: str) -> bool:
@@ -60,6 +61,18 @@ def is_within_advisor_cutoff_window(date_str: str, start_time: str) -> bool:
         return False
 
 
+def has_started(date_str: str, start_time: str) -> bool:
+    """True ถ้าถึงเวลาเริ่มนัดแล้ว (ใช้ตอนอาจารย์ปิดคิวที่ยัง Approved ระหว่างรอ worker เปลี่ยนเป็น InProgress)"""
+    now_utc7 = datetime.now(timezone.utc).astimezone(_TZ_UTC7)
+    try:
+        start_dt = datetime.strptime(
+            f"{date_str} {start_time}", "%Y-%m-%d %H:%M"
+        ).replace(tzinfo=_TZ_UTC7)
+        return now_utc7 >= start_dt
+    except ValueError:
+        return False
+
+
 def can_cancel_approved(date_str: str, start_time: str) -> bool:
     """True ถ้ายังไม่ถึงช่วง cutoff ก่อนเวลานัด (ฝั่งอาจารย์ยกเลิกคิวที่ Approved แล้ว)"""
     now_utc7 = datetime.now(timezone.utc).astimezone(_TZ_UTC7)
@@ -87,7 +100,7 @@ def recalculate_slot_booked(db, advisor_id: str, date: str, start: str, end: str
             "AdvisorId": advisor_id,
             "Date": date,
             "Time": f"{start}-{end}",
-            "Status": {"$in": SLOT_BLOCKING_STATUSES},
+            "Status": {"$in": ACTIVE_STATUSES},  # คิวที่ active ล็อก slot
         })
         new_is_locked = real_booked >= 1
 
@@ -107,6 +120,18 @@ def recalculate_slot_booked(db, advisor_id: str, date: str, start: str, end: str
         if target_index is None:
             logger.warning(f"[WARN] recalculate_slot_booked: ไม่พบ slot {start}-{end} date={date}")
             return None, None
+
+        current = slots[target_index]
+        if not new_is_locked and current.get("booked", 0) == 0 and (
+            current.get("isLocked", False) or current.get("is_closed", False)
+        ):
+            # ไม่มีคิว และตัว slot ก็ไม่เคยถูกคิวล็อก (booked=0) แต่ปิดอยู่ = อาจารย์ปิดเอง (SaveDaySchedule)
+            # ห้ามปลดล็อก ไม่งั้นการ sync จะเปิด slot ที่อาจารย์ตั้งใจปิดกลับมาให้จอง
+            logger.info(
+                "[INFO] recalculate_slot_booked: advisorId=%s %s %s-%s ปิดโดยอาจารย์ คงสถานะไว้",
+                advisor_id, date, start, end,
+            )
+            return 0, True
 
         if new_is_locked:
             col_slots.update_one(
@@ -263,16 +288,20 @@ def split_time_range(time_str: str) -> tuple[str, str]:
 
 
 def ensure_slot_open_for_reschedule(db, advisor_id: str, date: str, start: str, end: str) -> None:
-    """ตรวจว่า slot ปลายทางที่จะเลื่อนคิวไปยังว่างอยู่ (raise HTTPException ถ้าไม่ว่าง)
+    """ตรวจว่า slot ปลายทางที่จะเลื่อนคิวไปยังมีจริงและว่างอยู่ (raise HTTPException ถ้าไม่ผ่าน)
 
-    ถ้าไม่พบ document ของอาจารย์ในวันนั้นเลยจะไม่ raise (พฤติกรรมเดิมของทั้งสองหน้าเลื่อนคิว)
+    วันที่ต้องเป็น YYYY-MM-DD และตั้งแต่พรุ่งนี้เป็นต้นไป (ตรงกับที่หน้าเลือกเวลาแสดง)
+    ไม่พบ slot ของอาจารย์ในวันนั้น = 404 (เดิมปล่อยผ่านจนย้ายคิวไปวัน/เวลาที่ไม่มีอยู่จริงได้)
     """
+    if not _DATE_RE.match(date or "") or date < get_tomorrow_str():
+        raise HTTPException(status_code=400, detail="วันที่ต้องเป็นรูปแบบ YYYY-MM-DD และตั้งแต่พรุ่งนี้เป็นต้นไป")
+
     slot_doc = db["ManageTimeSlots"].find_one(
         {"advisorId": advisor_id, f"dates.{date}": {"$exists": True}},
         {"dates": 1},
     )
     if not slot_doc:
-        return
+        raise HTTPException(status_code=404, detail="ไม่พบช่วงเวลาของอาจารย์ในวันที่เลือก")
 
     slots = slot_doc.get("dates", {}).get(date, [])
     target = next((s for s in slots if s.get("start") == start and s.get("end") == end), None)
@@ -295,13 +324,14 @@ def move_booking_to_slot(
     old_end: str,
     extra_fields: dict,
     now: datetime,
-) -> None:
+) -> bool:
     """ย้าย booking ไปช่วงเวลาใหม่: อัปเดต booking -> คืน slot เก่า -> จอง slot ใหม่
 
     extra_fields = ฟิลด์เฉพาะฝั่งผู้เลื่อน (นักศึกษา: RescheduledOnce, อาจารย์: AdvisorRescheduledOnce)
+    คืน False (ไม่แตะ slot) ถ้าคิวไม่ได้อยู่สถานะ Approved แล้ว เช่น ถูกยกเลิก/เริ่มไปแล้วระหว่างที่ตรวจ
     """
-    db["BookingOnline"].update_one(
-        {"_id": booking["_id"]},
+    moved = db["BookingOnline"].update_one(
+        {"_id": booking["_id"], "Status": "Approved"},
         {"$set": {
             "Date": new_date,
             "Time": f"{new_start}-{new_end}",
@@ -310,25 +340,102 @@ def move_booking_to_slot(
             "UpdatedAt": now,
         }},
     )
+    if moved.matched_count == 0:
+        return False
 
     if advisor_id and old_start and old_end:
         update_slot(db, advisor_id, booking.get("Date", ""), old_start, old_end, action="release")
     if advisor_id:
         update_slot(db, advisor_id, new_date, new_start, new_end, action="book")
+    return True
 
 
-def cancel_booking_and_sync_slot(db, booking: dict, now: datetime, extra_fields: dict | None = None) -> None:
-    """เปลี่ยนสถานะ booking เป็น Cancelled แล้ว sync slot ให้ว่าง
+def mark_booking_cancelled(db, booking: dict, now: datetime, extra_fields: dict | None = None) -> bool:
+    """เปลี่ยนสถานะ booking เป็น Cancelled เฉพาะเมื่อยังอยู่สถานะที่ยกเลิกได้
 
-    สองขั้นนี้ต้องต่อกัน (recalculate_slot_booked นับ booking จริงจากสถานะ) ส่วน history ต่างๆ
-    ไม่พึ่งผลของขั้นนี้ จึงให้ผู้เรียกรันพร้อมกันด้วย run_parallel
+    คืน False ถ้าสถานะเปลี่ยนไปแล้วระหว่างที่ตรวจ (เช่น อาจารย์กำลังปิดคิว/ระบบเริ่มนัด) ผู้เรียกต้อง
+    ไม่เขียนประวัติและตอบ 409 — เดิมเขียนทับสถานะใดก็ได้ ทำให้คิวที่ Completed กลายเป็น Cancelled
     extra_fields = ฟิลด์เสริมที่ต้อง $set ตอนยกเลิก (เช่น CancelReason ของนักศึกษา)
     """
-    db["BookingOnline"].update_one(
-        {"_id": booking["_id"]},
+    result = db["BookingOnline"].update_one(
+        {"_id": booking["_id"], "Status": {"$in": CANCELLABLE_STATUSES}},
         {"$set": {"Status": "Cancelled", "UpdatedAt": now, **(extra_fields or {})}},
     )
+    return result.matched_count == 1
+
+
+def sync_slot_for_booking(db, booking: dict) -> None:
+    """sync slot ของ booking ที่เพิ่งถูกยกเลิก (นับ booking จริงใหม่ → ปลดล็อกถ้าไม่เหลือคิว)"""
     start, end = split_time_range(booking.get("Time", ""))
     date       = booking.get("Date", "")
     if booking.get("AdvisorId") and date and start and end:
         recalculate_slot_booked(db, booking["AdvisorId"], date, start, end)
+
+
+
+def unavailable_advisor_ids(db, advisor_ids) -> set:
+    """advisorId ที่มีโปรไฟล์แต่ไม่ควรรับจอง (ไม่ใช่ Advisor หรือสถานะไม่ใช่ Approved เช่น Suspended)
+
+    อาจารย์ที่ถูกระงับต้องไม่โผล่ในรายชื่อและจองไม่ได้ ส่วน id ที่ไม่มีโปรไฟล์เลยไม่ถูกตัดออก
+    (คงพฤติกรรมเดิมสำหรับข้อมูลเก่า) — ตอน Admin ลบอาจารย์ slot ของอาจารย์ถูกลบไปพร้อมกันอยู่แล้ว
+    """
+    ids = [a for a in set(advisor_ids) if a]
+    if not ids:
+        return set()
+    return {
+        p["userId"]
+        for p in db["UserProfile"].find(
+            {
+                "userId": {"$in": ids},
+                "$or": [{"Role": {"$ne": "Advisor"}}, {"Status": {"$ne": "Approved"}}],
+            },
+            {"_id": 0, "userId": 1},
+        )
+    }
+
+
+def validate_date_or_400(date: str) -> str:
+    """ตรวจว่าเป็นวันที่ YYYY-MM-DD ที่มีอยู่จริง (raise 400) — วันที่ถูกใช้ประกอบเป็น key `dates.{date}` ใน MongoDB
+    จึงต้องไม่รับรูปแบบแปลก (มีจุด/อักขระพิเศษ) จากผู้ใช้"""
+    if not _DATE_RE.match(date or ""):
+        raise HTTPException(status_code=400, detail="รูปแบบวันที่ไม่ถูกต้อง (YYYY-MM-DD)")
+    try:
+        datetime.strptime(date, "%Y-%m-%d")
+    except ValueError:
+        raise HTTPException(status_code=400, detail="วันที่ไม่ถูกต้อง")
+    return date
+
+
+# ─── กฎ "slot จองได้หรือไม่" (ใช้ร่วมกันโดยหน้าจองและหน้าดูช่วงเวลาของนักศึกษา) ───────────
+def slot_is_taken(slot: dict) -> bool:
+    """slot ถูกล็อก ปิด หรือเต็มแล้ว (จองไม่ได้)"""
+    return (
+        slot.get("isLocked", False)
+        or slot.get("is_closed", False)
+        or slot.get("booked", 0) >= slot.get("max_booking", 1)
+    )
+
+
+def cutoff_datetime(date: str, start: str) -> datetime | None:
+    """เวลาปิดรับจอง = เวลาเริ่ม - CUTOFF_HOURS (UTC+7); None ถ้าเวลาเริ่มผิดรูปแบบ"""
+    try:
+        start_dt = datetime.strptime(f"{date} {start}", "%Y-%m-%d %H:%M").replace(tzinfo=_TZ_UTC7)
+    except ValueError:
+        return None
+    return start_dt - timedelta(hours=CUTOFF_HOURS)
+
+
+def has_bookable_slot(slots: list, date: str, today: str, now: datetime) -> bool:
+    """มี slot ที่จองได้อย่างน้อย 1 ช่วง — ถ้าเป็นวันนี้ ต้องยังไม่เลยเวลา cutoff
+
+    (เวลาเริ่มที่ผิดรูปแบบของวันนี้ ไม่ถูกนับว่าว่าง: พฤติกรรมเดิมของรายชื่ออาจารย์)
+    """
+    for s in slots:
+        if slot_is_taken(s):
+            continue
+        if date != today:
+            return True
+        cutoff = cutoff_datetime(date, s["start"])
+        if cutoff is not None and now < cutoff:
+            return True
+    return False

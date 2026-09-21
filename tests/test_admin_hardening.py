@@ -239,3 +239,11 @@ def test_legacy_token_without_iat_still_works_until_password_changes(client, mon
 
     mongo_client["BORC"]["LoginAdmin"].update_one({}, {"$set": {"passwordChangedAt": datetime.now(timezone.utc)}})
     assert client.get("/authAdmin/me", headers=_bearer(legacy)).status_code == 401
+
+
+def test_admin_password_over_72_bytes_is_rejected_not_500():
+    """bcrypt 5.x โยน ValueError เกิน 72 ไบต์ — ต้องกลายเป็น 401 ที่ login (ไม่ใช่ 500)"""
+    import Admin.auth.authAdmin as auth
+    assert auth.MAX_PASSWORD_BYTES == 72
+    long_thai = "ก" * 30  # 90 ไบต์
+    assert len(long_thai.encode("utf-8")) > auth.MAX_PASSWORD_BYTES
