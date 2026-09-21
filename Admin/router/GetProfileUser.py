@@ -49,7 +49,7 @@ def save_history(col_history, first_name: str, last_name: str, role: str, status
 #  GET  /Profile  – ดึงรายชื่อทั้งหมด
 # ─────────────────────────────────────────
 @router.get("/Profile")
-async def get_all_profiles():
+def get_all_profiles():
     client = Connect_MongoDB()
 
     db  = client["BORC"]

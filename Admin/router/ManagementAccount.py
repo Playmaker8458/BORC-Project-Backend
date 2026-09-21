@@ -189,7 +189,7 @@ def Update_AccountUser(client, body: UpdateUserRequest):
 # ─────────────────────────────────────────
 
 @router.get("/ShowAccountUser")
-async def ShowAccountUser():
+def ShowAccountUser():
     try:
         client = Connect_MongoDB()
         return GetData_AccountUser(client=client)
