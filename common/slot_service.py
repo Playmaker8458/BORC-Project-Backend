@@ -86,6 +86,25 @@ def can_cancel_approved(date_str: str, start_time: str) -> bool:
         return False
 
 
+def _find_slot(col_slots, advisor_id: str, date: str, start: str, end: str):
+    """หา slot เป้าหมายจากทุก doc ของอาจารย์ (อาจมีหลาย doc ที่มีวันเดียวกัน)
+
+    คืน (doc, index, slot) หรือ (None, None, None) — ผู้เรียกต้อง update ด้วย doc["_id"]
+    เดิมใช้ find_one ได้แค่ doc แรก ทำให้ slot ที่อยู่ใน doc อื่นหาไม่เจอ/อัปเดตผิด doc
+    """
+    for doc in col_slots.find(
+        {"advisorId": advisor_id, f"dates.{date}": {"$exists": True}},
+        {f"dates.{date}": 1},
+    ):
+        slots = doc.get("dates", {}).get(date, [])
+        if not isinstance(slots, list):
+            continue
+        for i, s in enumerate(slots):
+            if s.get("start") == start and s.get("end") == end:
+                return doc, i, s
+    return None, None, None
+
+
 def recalculate_slot_booked(db, advisor_id: str, date: str, start: str, end: str):
     """นับ booking จริงแล้ว sync กลับไปที่ slot (keyed ด้วย advisorId)
 
@@ -104,24 +123,11 @@ def recalculate_slot_booked(db, advisor_id: str, date: str, start: str, end: str
         })
         new_is_locked = real_booked >= 1
 
-        doc = col_slots.find_one(
-            {"advisorId": advisor_id, f"dates.{date}": {"$exists": True}},
-            {"dates": 1}
-        )
-        if not doc:
-            logger.warning(f"[WARN] recalculate_slot_booked: ไม่พบ doc advisorId={advisor_id} date={date}")
+        doc, target_index, current = _find_slot(col_slots, advisor_id, date, start, end)
+        if doc is None:
+            logger.warning(f"[WARN] recalculate_slot_booked: ไม่พบ slot {start}-{end} advisorId={advisor_id} date={date}")
             return None, None
 
-        slots = doc.get("dates", {}).get(date, [])
-        target_index = next(
-            (i for i, s in enumerate(slots) if s["start"] == start and s["end"] == end),
-            None
-        )
-        if target_index is None:
-            logger.warning(f"[WARN] recalculate_slot_booked: ไม่พบ slot {start}-{end} date={date}")
-            return None, None
-
-        current = slots[target_index]
         if not new_is_locked and current.get("booked", 0) == 0 and (
             current.get("isLocked", False) or current.get("is_closed", False)
         ):
@@ -175,26 +181,14 @@ def update_slot(db, advisor_id: str, date: str, start: str, end: str, action: st
     """
     try:
         col_slots = db["ManageTimeSlots"]
-        doc = col_slots.find_one(
-            {"advisorId": advisor_id, f"dates.{date}": {"$exists": True}},
-            {"dates": 1}
-        )
-        if not doc:
-            logger.warning(f"[WARN] update_slot: ไม่พบ doc ของ advisorId={advisor_id}")
-            return
-
-        slots = doc.get("dates", {}).get(date, [])
-        target_index = next(
-            (i for i, s in enumerate(slots) if s.get("start") == start and s.get("end") == end),
-            None
-        )
-        if target_index is None:
+        doc, target_index, target = _find_slot(col_slots, advisor_id, date, start, end)
+        if doc is None:
             logger.warning(f"[WARN] update_slot: ไม่พบ slot {start}-{end} วันที่ {date}")
             return
 
         if action == "book":
             col_slots.update_one(
-                {"advisorId": advisor_id},
+                {"_id": doc["_id"]},
                 {
                     "$set": {
                         f"dates.{date}.{target_index}.isLocked": True,
@@ -208,9 +202,9 @@ def update_slot(db, advisor_id: str, date: str, start: str, end: str, action: st
             logger.info(f"[INFO] update_slot (book): {advisor_id} {date} {start}-{end} → booked+1, locked")
 
         elif action == "release":
-            current_booked = slots[target_index].get("booked", 0)
+            current_booked = target.get("booked", 0)
             col_slots.update_one(
-                {"advisorId": advisor_id},
+                {"_id": doc["_id"]},
                 {"$set": {
                     f"dates.{date}.{target_index}.booked": max(0, current_booked - 1),
                     f"dates.{date}.{target_index}.isLocked": False,
@@ -237,46 +231,77 @@ def get_tomorrow_str() -> str:
     return (get_now_utc7() + timedelta(days=1)).strftime("%Y-%m-%d")
 
 
-def get_reschedule_available_dates(db, advisor_id: str) -> dict:
-    """slot ที่ยังว่างของอาจารย์ตั้งแต่ "พรุ่งนี้" เป็นต้นไป รูปแบบ {date: [slot, ...]}
+def _open_slots(slots: list) -> list:
+    """กรองเฉพาะ slot ที่ยังไม่ปิดและยังมีที่ว่าง แปลงเป็นรูปแบบที่หน้าเลื่อนคิวใช้"""
+    result = []
+    for s in slots:
+        is_closed = s.get("isLocked", False) or s.get("is_closed", False)
+        max_book = s.get("max_booking", 1)
+        available = max(0, max_book - s.get("booked", 0))
+        if is_closed or available <= 0:
+            continue
+        result.append({
+            "start": s["start"],
+            "end": s["end"],
+            "label": s.get("label", ""),
+            "available": available,
+            "max_booking": max_book,
+        })
+    return result
 
-    ใช้ร่วมกันโดยหน้าเลื่อนคิวของนักศึกษาและอาจารย์ (เดิมเป็นสำเนาโค้ดเดียวกันสองที่)
+
+def _same_day_slot(date: str, s: dict, old_start: str) -> dict:
+    """แปลง slot ในวันเดิมของคิวเป็นรูปแบบหน้าเลื่อนคิว พร้อม status
+
+    current = เวลาเดิมของคิว, full = มีคนจองเต็มแล้ว, closed = อาจารย์ปิดไว้,
+    past = เหลือเวลาไม่ถึง cutoff (1 ชม.) ก่อนเริ่ม, open = เลือกได้
+    """
+    max_book = s.get("max_booking", 1)
+    booked = s.get("booked", 0)
+    if s["start"] == old_start:
+        status = "current"
+    elif booked >= max_book:
+        status = "full"
+    elif s.get("isLocked", False) or s.get("is_closed", False):
+        status = "closed"
+    elif is_within_cutoff(date, s["start"]):
+        status = "past"
+    else:
+        status = "open"
+    return {
+        "start": s["start"],
+        "end": s["end"],
+        "label": s.get("label", ""),
+        "available": max(0, max_book - booked),
+        "max_booking": max_book,
+        "status": status,
+    }
+
+
+def get_reschedule_slot_options(db, advisor_id: str, booking_date: str, old_start: str) -> dict:
+    """slot ว่างสำหรับหน้าเลื่อนคิว (ใช้ร่วมกันทั้งนักศึกษาและอาจารย์) — query ManageTimeSlots ครั้งเดียว
+
+    - dates   : {date: [slot, ...]} ตั้งแต่ "พรุ่งนี้" เป็นต้นไป (โหมดเลื่อนวันและเวลา)
+    - same_day: slot "ทั้งหมด" ที่อาจารย์ตั้งไว้ในวันเดิมของคิว พร้อม status (โหมดเลื่อนเฉพาะเวลา)
+                แสดงช่วงที่เลือกไม่ได้ด้วย เพื่อให้ผู้ใช้เห็นว่าเต็ม/ปิด — เลือกได้เฉพาะ status="open"
+    รวม slot จากทุก doc ของอาจารย์
     """
     min_date = get_tomorrow_str()
+    dates: dict = {}
+    same_day: list = []
 
-    docs = list(db["ManageTimeSlots"].find(
-        {"advisorId": advisor_id},
-        {"_id": 0, "dates": 1}
-    ))
-
-    merged_dates: dict = {}
-    for doc in docs:
+    for doc in db["ManageTimeSlots"].find({"advisorId": advisor_id}, {"_id": 0, "dates": 1}):
         for date, slots in doc.get("dates", {}).items():
-            if not isinstance(slots, list) or date < min_date:
+            if not isinstance(slots, list):
                 continue
+            if date == booking_date:
+                same_day.extend(_same_day_slot(date, s, old_start) for s in slots)
+            if date >= min_date:
+                available_slots = _open_slots(slots)
+                if available_slots:
+                    dates.setdefault(date, []).extend(available_slots)
 
-            available_slots = []
-            for s in slots:
-                is_closed = s.get("isLocked", False) or s.get("is_closed", False)
-                booked = s.get("booked", 0)
-                max_book = s.get("max_booking", 1)
-                available = max(0, max_book - booked)
-
-                if is_closed or available <= 0:
-                    continue
-
-                available_slots.append({
-                    "start": s["start"],
-                    "end": s["end"],
-                    "label": s.get("label", ""),
-                    "available": available,
-                    "max_booking": max_book,
-                })
-
-            if available_slots:
-                merged_dates[date] = available_slots
-
-    return merged_dates
+    return {"dates": dates, "same_day": sorted(same_day, key=lambda s: s["start"])}
 
 
 def split_time_range(time_str: str) -> tuple[str, str]:
@@ -287,24 +312,23 @@ def split_time_range(time_str: str) -> tuple[str, str]:
     return "", ""
 
 
-def ensure_slot_open_for_reschedule(db, advisor_id: str, date: str, start: str, end: str) -> None:
+def ensure_slot_open_for_reschedule(
+    db, advisor_id: str, date: str, start: str, end: str, same_day: bool = False
+) -> None:
     """ตรวจว่า slot ปลายทางที่จะเลื่อนคิวไปยังมีจริงและว่างอยู่ (raise HTTPException ถ้าไม่ผ่าน)
 
     วันที่ต้องเป็น YYYY-MM-DD และตั้งแต่พรุ่งนี้เป็นต้นไป (ตรงกับที่หน้าเลือกเวลาแสดง)
+    same_day=True (เลื่อนเฉพาะเวลาในวันเดิม) อนุญาตวันนี้ได้ ถ้า slot ยังไม่ถึง cutoff
     ไม่พบ slot ของอาจารย์ในวันนั้น = 404 (เดิมปล่อยผ่านจนย้ายคิวไปวัน/เวลาที่ไม่มีอยู่จริงได้)
     """
-    if not _DATE_RE.match(date or "") or date < get_tomorrow_str():
+    if same_day:
+        # โหมดเลื่อนเฉพาะเวลา: ผู้เรียกตรวจแล้วว่าเป็นวันเดิมของคิว (อาจเป็นวันนี้) — ต้องยังไม่ถึง cutoff
+        if not _DATE_RE.match(date or "") or is_within_cutoff(date, start):
+            raise HTTPException(status_code=400, detail="ช่วงเวลานี้ใกล้ถึงเวลานัดเกินไป กรุณาเลือกช่วงเวลาอื่น")
+    elif not _DATE_RE.match(date or "") or date < get_tomorrow_str():
         raise HTTPException(status_code=400, detail="วันที่ต้องเป็นรูปแบบ YYYY-MM-DD และตั้งแต่พรุ่งนี้เป็นต้นไป")
 
-    slot_doc = db["ManageTimeSlots"].find_one(
-        {"advisorId": advisor_id, f"dates.{date}": {"$exists": True}},
-        {"dates": 1},
-    )
-    if not slot_doc:
-        raise HTTPException(status_code=404, detail="ไม่พบช่วงเวลาของอาจารย์ในวันที่เลือก")
-
-    slots = slot_doc.get("dates", {}).get(date, [])
-    target = next((s for s in slots if s.get("start") == start and s.get("end") == end), None)
+    _, _, target = _find_slot(db["ManageTimeSlots"], advisor_id, date, start, end)
     if not target:
         raise HTTPException(status_code=404, detail="ไม่พบช่วงเวลาที่เลือก")
     if target.get("isLocked", False) or target.get("is_closed", False):

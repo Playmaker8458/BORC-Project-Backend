@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from dotenv import load_dotenv
 from common.slot_service import (
     ensure_slot_open_for_reschedule,
-    get_reschedule_available_dates,
+    get_reschedule_slot_options,
     is_within_cutoff,
     move_booking_to_slot,
     split_time_range,
@@ -31,8 +31,10 @@ class RescheduleForm:
         new_start : str = Form(...),
         new_end   : str = Form(...),
         new_label : str = Form(""),
-        reason    : str = Form(...)
+        reason    : str = Form(...),
+        mode      : str = Form("date_time"),  # "date_time" | "time_only" (เลื่อนเฉพาะเวลาในวันเดิม)
     ):
+        self.mode      = mode
         self.new_date  = new_date
         self.new_start = new_start
         self.new_end   = new_end
@@ -119,13 +121,14 @@ def get_available_slots(request: Request):
         )
 
         if not booking:
-            return {"dates": {}}
+            return {"dates": {}, "same_day": []}
 
         advisor_id = booking.get("AdvisorId", "")
         if not advisor_id:
-            return {"dates": {}}
+            return {"dates": {}, "same_day": []}
 
-        return {"dates": get_reschedule_available_dates(db, advisor_id)}
+        old_start, _ = split_time_range(booking.get("Time", ""))
+        return get_reschedule_slot_options(db, advisor_id, booking.get("Date", ""), old_start)
 
     except HTTPException:
         raise
@@ -206,8 +209,19 @@ def reschedule_booking(request: Request, background_tasks: BackgroundTasks, data
         advisor_name = booking.get("Advisor_Name", "")
         student_name = booking.get("StudentName", "")
 
+        if data.mode not in ("date_time", "time_only"):
+            raise HTTPException(status_code=400, detail="รูปแบบการเลื่อนคิวไม่ถูกต้อง")
+        same_day = data.mode == "time_only"
+        if same_day:
+            if data.new_date != booking.get("Date", ""):
+                raise HTTPException(status_code=400, detail="การเลื่อนเฉพาะเวลาต้องเป็นวันเดียวกับนัดเดิม")
+            if data.new_start == old_start:
+                raise HTTPException(status_code=400, detail="กรุณาเลือกช่วงเวลาที่ต่างจากเวลาเดิม")
+
         if advisor_id:
-            ensure_slot_open_for_reschedule(db, advisor_id, data.new_date, data.new_start, data.new_end)
+            ensure_slot_open_for_reschedule(
+                db, advisor_id, data.new_date, data.new_start, data.new_end, same_day=same_day
+            )
 
         now = datetime.now(timezone.utc)
         if not move_booking_to_slot(

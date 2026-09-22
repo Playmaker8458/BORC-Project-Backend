@@ -9,7 +9,7 @@ from pydantic import BaseModel
 from dotenv import load_dotenv
 from common.slot_service import (
     ensure_slot_open_for_reschedule,
-    get_reschedule_available_dates,
+    get_reschedule_slot_options,
     is_within_advisor_cutoff_window,
     move_booking_to_slot,
     split_time_range,
@@ -32,6 +32,7 @@ class RescheduleBody(BaseModel):
     new_end   : str
     new_label : str = ""
     reason    : str = ""
+    mode      : str = "date_time"  # "date_time" | "time_only" (เลื่อนเฉพาะเวลาในวันเดิม)
 
 
 # ─── GET /advisor-reschedule/BookingInfo?user_id=<studentUserId> ──────────────
@@ -120,16 +121,17 @@ def get_available_slots(user_id: str, request: Request):
         db      = Connect_MongoDB()["BORC"]
         booking = db["BookingOnline"].find_one(
             {"UserId": user_id, "Status": {"$in": ACTIVE_STATUSES}},
-            {"AdvisorId": 1}
+            {"AdvisorId": 1, "Date": 1, "Time": 1}
         )
 
         if not booking:
-            return {"dates": {}}
+            return {"dates": {}, "same_day": []}
 
         if booking.get("AdvisorId", "") != advisor_id:
             raise HTTPException(status_code=403, detail="ไม่มีสิทธิ์จัดการคิวนี้")
 
-        return {"dates": get_reschedule_available_dates(db, advisor_id)}
+        old_start, _ = split_time_range(booking.get("Time", ""))
+        return get_reschedule_slot_options(db, advisor_id, booking.get("Date", ""), old_start)
 
     except HTTPException:
         raise
@@ -207,7 +209,18 @@ def reschedule_booking(request: Request, body: RescheduleBody, background_tasks:
         db = Connect_MongoDB()["BORC"]
         booking, old_start, old_end = _load_reschedulable_booking(db, advisor_id, body.user_id)
 
-        ensure_slot_open_for_reschedule(db, advisor_id, body.new_date, body.new_start, body.new_end)
+        if body.mode not in ("date_time", "time_only"):
+            raise HTTPException(status_code=400, detail="รูปแบบการเลื่อนคิวไม่ถูกต้อง")
+        same_day = body.mode == "time_only"
+        if same_day:
+            if body.new_date != booking.get("Date", ""):
+                raise HTTPException(status_code=400, detail="การเลื่อนเฉพาะเวลาต้องเป็นวันเดียวกับนัดเดิม")
+            if body.new_start == old_start:
+                raise HTTPException(status_code=400, detail="กรุณาเลือกช่วงเวลาที่ต่างจากเวลาเดิม")
+
+        ensure_slot_open_for_reschedule(
+            db, advisor_id, body.new_date, body.new_start, body.new_end, same_day=same_day
+        )
 
         now = datetime.now(timezone.utc)
         if not move_booking_to_slot(
