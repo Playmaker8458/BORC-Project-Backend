@@ -24,7 +24,15 @@ CHATBOT_INTERNAL_HEADERS = {"X-Internal-Secret": os.getenv("INTERNAL_SERVICE_SEC
 def notify_chatbot(url: str, payload: dict, headers: dict, timeout: int = 5):
     """POST แจ้งเตือนไปที่ url ที่ระบุ คืน Response ถ้าสำเร็จ หรือ None ถ้าล้มเหลว"""
     try:
-        return requests.post(url, json=payload, timeout=timeout, headers=headers)
+        resp = requests.post(url, json=payload, timeout=timeout, headers=headers)
     except Exception as e:
         logger.warning(f"[WARN] แจ้งเตือนไปยัง {url} ล้มเหลว: {e}")
         return None
+    # ChatBot ตอบ error (เช่น 401 secret ไม่ตรง / 404 ไม่พบ LINE ของผู้ใช้ / 500) — เดิมไม่ได้ตรวจเลย
+    # ทำให้การแจ้งเตือนหายไปเงียบ ๆ โดยไม่มี log ให้ตามต่อ
+    status = getattr(resp, "status_code", 200)
+    if isinstance(status, int) and status >= 400:
+        logger.warning(
+            "[WARN] แจ้งเตือนไปยัง %s ถูกปฏิเสธ: HTTP %s %s", url, status, str(getattr(resp, "text", ""))[:300]
+        )
+    return resp

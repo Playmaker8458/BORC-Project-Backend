@@ -194,30 +194,36 @@ def cancel_booking(request: Request, body: CancelBookingRequest, background_task
         if not mark_booking_cancelled(db, booking, now, {"CancelReason": body.cancelReason.strip()}):
             raise HTTPException(status_code=409, detail="สถานะคิวเปลี่ยนไปแล้ว กรุณารีเฟรชหน้าแล้วลองใหม่อีกครั้ง")
 
-        run_parallel(
-            lambda: sync_slot_for_booking(db, booking),
-            lambda: db["CancelBookingHistory"].insert_one({
-                "cancelledById"  : user_id,
-                "cancelledByRole": "Student",
-                "advisorId"      : booking.get("AdvisorId", ""),
-                "advisorName"    : advisor_name,
-                "studentName"    : booking.get("StudentName", ""),
-                "status"         : "Cancelled",
-                "cancelReason"   : body.cancelReason.strip(),
-                "createdAt"      : now,
-                "updatedAt"      : now,
-            }),
-            lambda: log_queue_management_history(
-                db,
-                advisor_id=booking.get("AdvisorId", ""),
-                advisor_name=advisor_name,
-                student_id=user_id,
-                student_name=booking.get("StudentName", ""),
-                status="Cancelled",
-                reason=body.cancelReason.strip(),
-                now=now,
-            ),
-        )
+        # คิวถูกยกเลิกแล้วใน DB — งานต่อจากนี้ (sync slot / เขียนประวัติ) ห้ามทำให้ request ล้ม
+        # เดิมถ้าตัวใดตัวหนึ่ง raise จะตอบ 500 ทั้งที่ยกเลิกสำเร็จ และ background task แจ้งเตือน LINE
+        # ไม่ถูกรันเลย (FastAPI ไม่รัน background tasks เมื่อ response เป็น error)
+        try:
+            run_parallel(
+                lambda: sync_slot_for_booking(db, booking),
+                lambda: db["CancelBookingHistory"].insert_one({
+                    "cancelledById"  : user_id,
+                    "cancelledByRole": "Student",
+                    "advisorId"      : booking.get("AdvisorId", ""),
+                    "advisorName"    : advisor_name,
+                    "studentName"    : booking.get("StudentName", ""),
+                    "status"         : "Cancelled",
+                    "cancelReason"   : body.cancelReason.strip(),
+                    "createdAt"      : now,
+                    "updatedAt"      : now,
+                }),
+                lambda: log_queue_management_history(
+                    db,
+                    advisor_id=booking.get("AdvisorId", ""),
+                    advisor_name=advisor_name,
+                    student_id=user_id,
+                    student_name=booking.get("StudentName", ""),
+                    status="Cancelled",
+                    reason=body.cancelReason.strip(),
+                    now=now,
+                ),
+            )
+        except Exception:
+            logger.exception("[Cancel] ยกเลิกคิว %s แล้ว แต่ sync slot/เขียนประวัติไม่สำเร็จ", booking["_id"])
 
         # ดึง AdvisorId จาก booking เพื่อใช้ส่งการแจ้งเตือน
         advisor_id = booking.get("AdvisorId", "")
