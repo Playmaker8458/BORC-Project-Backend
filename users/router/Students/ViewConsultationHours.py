@@ -5,6 +5,7 @@ from ...Database.ConnectDB import Connect_MongoDB
 from users.auth.authUser import verify_user_token
 
 from common.slot_service import get_now_utc7, get_today_str, has_bookable_slot, unavailable_advisor_ids
+from common.time_slot_rules import slot_status
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -88,26 +89,10 @@ def get_advisor_slots(advisor_id: str, request: Request):
                 if not isinstance(slots, list) or date < today:
                     continue
 
-                slot_list = []
-                for s in slots:
-                    is_locked   = s.get("isLocked", False)
-                    is_closed   = s.get("is_closed", False)
-                    booked      = s.get("booked", 0)
-                    max_booking = s.get("max_booking", 1)
-
-                    if is_closed and not is_locked:
-                        status = "ปิด"
-                    elif is_locked or booked >= max_booking:
-                        status = "เต็ม"
-                    else:
-                        status = "ว่าง"
-
-                    slot_list.append({
-                        "start" : s["start"],
-                        "end"   : s["end"],
-                        "label" : s.get("label", ""),
-                        "status": status,
-                    })
+                slot_list = [
+                    {"start": s["start"], "end": s["end"], "label": s.get("label", ""), "status": slot_status(s)}
+                    for s in slots
+                ]
 
                 if slot_list:
                     merged_dates[date] = slot_list

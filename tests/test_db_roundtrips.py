@@ -195,7 +195,7 @@ SCENARIOS = [
     # ── อาจารย์: เปิด-ปิดช่วงเวลา ──
     ("advisor GetDaySlots", "advisor-1", "GET", f"/advisor-schedule/GetDaySlots/{FUTURE2}", {}, "Approved"),
     ("advisor SaveDaySchedule", "advisor-1", "PUT", "/advisor-schedule/SaveDaySchedule",
-     {"json": {"date": FUTURE2, "day_closed": False, "slots": [{"start": "10:00", "end": "11:00", "is_closed": True},
+     {"json": {"date": FUTURE2, "slots": [{"start": "10:00", "end": "11:00", "is_closed": True},
                                                                  {"start": "13:00", "end": "14:00", "is_closed": False}]}}, "Approved"),
     # ── อาจารย์: หน้าแรก / ประวัติ ──
     ("advisor TodayQueue", "advisor-1", "GET", "/advisor/TodayQueue", {}, "Approved"),

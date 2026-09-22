@@ -131,6 +131,31 @@ def compute_is_locked(booked: int, current_locked: bool) -> bool:
     return current_locked
 
 
+def slot_is_locked(slot: dict) -> bool:
+    """slot ถูกล็อก (อาจารย์แก้/ลบไม่ได้) เมื่อมีนักศึกษาจองแล้ว
+
+    การ "ปิด" โดยอาจารย์ใช้แค่ is_closed ไม่นับเป็นการล็อก — ข้อมูลเก่าที่ SaveDaySchedule เคยตั้ง
+    isLocked=True คู่กับ is_closed=True (booked=0) จึงถือเป็นแค่ "ปิด" ด้วย
+    """
+    if slot.get("booked", 0) >= 1:
+        return True
+    return bool(slot.get("isLocked", False)) and not slot.get("is_closed", False)
+
+
+def slot_closed_by_advisor(slot: dict) -> bool:
+    """อาจารย์ปิด slot นี้เอง (ไม่ใช่ปิดเพราะมีคนจอง — การจองก็ตั้ง is_closed=True ด้วย)"""
+    return slot.get("booked", 0) < 1 and bool(slot.get("is_closed", False))
+
+
+def slot_status(slot: dict) -> str:
+    """สถานะที่แสดงในหน้าสรุป: เต็ม (มีคนจอง) / ปิด (อาจารย์ปิด) / ว่าง"""
+    if slot.get("booked", 0) >= slot.get("max_booking", 1) or slot_is_locked(slot):
+        return "เต็ม"
+    if slot.get("is_closed", False):
+        return "ปิด"
+    return "ว่าง"
+
+
 def merge_months(existing_doc: dict, new_date_keys) -> list:
     existing_months = set(existing_doc.get("months", [])) if existing_doc else set()
     new_months      = {d[:7] for d in new_date_keys}
@@ -158,7 +183,7 @@ def preserving_slot(start: str, end: str, old: dict | None) -> dict:
     booked = old.get("booked", 0) if old else 0
     return new_slot(
         start, end, booked,
-        is_locked=compute_is_locked(booked, old.get("isLocked", False) if old else False),
+        is_locked=slot_is_locked(old) if old else False,
         is_closed=compute_is_locked(booked, old.get("is_closed", False) if old else False),
     )
 

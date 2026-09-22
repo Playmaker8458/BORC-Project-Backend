@@ -15,11 +15,13 @@ from common.time_slot_rules import (
     ManageTimeSlotsRequest,
     UpdateSlotRequest,
     check_overlap,
-    compute_is_locked,
     is_slot,
     merge_months,
     new_slot,
     preserving_slot,
+    slot_closed_by_advisor,
+    slot_is_locked,
+    slot_status,
 )
 
 logger = logging.getLogger(__name__)
@@ -87,8 +89,8 @@ def _raise_if_too_many_slots(date: str, count: int) -> None:
 
 
 def _view_slot(s: dict) -> dict:
-    """slot ที่ส่งให้อาจารย์ดู: max_booking เป็น 1 เสมอ และ isLocked เป็นจริงเมื่อมีคนจองแล้ว"""
-    return {**s, "max_booking": 1, "isLocked": compute_is_locked(s.get("booked", 0), s.get("isLocked", False))}
+    """slot ที่ส่งให้อาจารย์ดู: max_booking เป็น 1 เสมอ และ isLocked เป็นจริงเมื่อมีคนจองแล้ว (ปิดเอง ≠ ล็อก)"""
+    return {**s, "max_booking": 1, "isLocked": slot_is_locked(s)}
 
 
 def get_db_collection():
@@ -199,26 +201,10 @@ def get_time_slots(request: Request):
             if not isinstance(slots, list) or date < today:
                 continue
 
-            slot_list = []
-            for s in slots:
-                is_locked   = s.get("isLocked", False)
-                is_closed   = s.get("is_closed", False)
-                booked      = s.get("booked", 0)
-                max_booking = s.get("max_booking", 1)
-
-                if is_locked or booked >= max_booking:
-                    status = "เต็ม"
-                elif is_closed:
-                    status = "ปิด"
-                else:
-                    status = "ว่าง"
-
-                slot_list.append({
-                    "start" : s["start"],
-                    "end"   : s["end"],
-                    "label" : s.get("label", ""),
-                    "status": status,
-                })
+            slot_list = [
+                {"start": s["start"], "end": s["end"], "label": s.get("label", ""), "status": slot_status(s)}
+                for s in slots
+            ]
 
             if slot_list:
                 merged_dates[date] = slot_list
@@ -310,7 +296,8 @@ def _find_unlocked_target(old_slots: list, date: str, start: str, end: str, acti
             status_code=404,
             detail=f"ไม่พบช่วงเวลา {start}-{end} ในวันที่ {date}"
         )
-    if target.get("isLocked", False):
+    # slot ที่อาจารย์ปิดเอง (ข้อมูลเก่ามี isLocked=True ติดมาด้วย) ยังแก้/ลบได้ — ล็อกจริงคือมีคนจอง
+    if target.get("isLocked", False) and not slot_closed_by_advisor(target):
         raise HTTPException(
             status_code=400,
             detail=f"ช่วงเวลา {start}-{end} ถูกล็อกแล้ว ไม่สามารถ{action}ได้"

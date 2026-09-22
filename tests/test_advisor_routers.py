@@ -612,7 +612,7 @@ def test_save_day_schedule_closes_unbooked_slots(ca_client, mongo_client):
 
     resp = ca_client.put(
         "/SaveDaySchedule",
-        json={"date": "2099-01-01", "day_closed": True, "slots": [{"start": "09:00", "end": "10:00", "is_closed": True}]},
+        json={"date": "2099-01-01", "slots": [{"start": "09:00", "end": "10:00", "is_closed": True}]},
         cookies=_cookies("advisor-1"),
     )
 
@@ -621,7 +621,7 @@ def test_save_day_schedule_closes_unbooked_slots(ca_client, mongo_client):
     assert doc["dates"]["2099-01-01"][0]["is_closed"] is True
 
     av_doc = mongo_client["BORC"]["ConsultationAvailability"].find_one({"advisorId": "advisor-1", "date": "2099-01-01"})
-    assert av_doc["day_closed"] is True
+    assert av_doc["slots"][0]["is_closed"] is True
 
 
 def test_save_day_schedule_404_when_no_slots_for_date(ca_client, mongo_client):
@@ -629,7 +629,7 @@ def test_save_day_schedule_404_when_no_slots_for_date(ca_client, mongo_client):
 
     resp = ca_client.put(
         "/SaveDaySchedule",
-        json={"date": "2099-01-01", "day_closed": True, "slots": []},
+        json={"date": "2099-01-01", "slots": []},
         cookies=_cookies("advisor-1"),
     )
 

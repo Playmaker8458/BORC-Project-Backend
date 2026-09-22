@@ -7,6 +7,7 @@ from ...auth.authUser import verify_user_token, get_user_id
 from datetime import datetime, timezone
 from common.booking_status import ACTIVE_STATUSES
 from common.slot_service import validate_date_or_400
+from common.time_slot_rules import slot_closed_by_advisor
 from pydantic import BaseModel
 from typing import List
 
@@ -20,9 +21,9 @@ class SlotToggle(BaseModel):
 
 
 class SaveScheduleBody(BaseModel):
-    date      : str
-    day_closed: bool = False
-    slots     : List[SlotToggle]
+    # เปิด-ปิดทีละช่วงเวลาเท่านั้น (เลิกใช้ "ปิดทั้งวัน" / day_closed แล้ว — client เก่าที่ยังส่งมาจะถูกละไว้)
+    date : str
+    slots: List[SlotToggle]
 
 
 # ---------------------------------------------------------------------------
@@ -37,7 +38,6 @@ def get_day_slots(date: str, request: Request):
 
         db     = Connect_MongoDB()["BORC"]
         ts_col = db["ManageTimeSlots"]
-        av_col = db["ConsultationAvailability"]
 
         # ✅ ดึงทุก document ของ advisor นี้ แล้วหา date ที่ต้องการ
         #    เพราะ dates อาจกระจายอยู่หลาย document (แยกตาม month)
@@ -57,20 +57,11 @@ def get_day_slots(date: str, request: Request):
 
 
         if not slots:
-            return {"date": date, "day_closed": False, "slots": []}
+            return {"date": date, "slots": []}
 
-        # ดึงสถานะจาก ConsultationAvailability (ถ้ามี)
-        av_doc = av_col.find_one(
-            {"advisorId": advisor_id, "date": date},
-            {"_id": 0, "day_closed": 1, "slots": 1}
-        )
-
-        day_closed  = av_doc.get("day_closed", False) if av_doc else False
-        av_slot_map = {}
-        if av_doc:
-            for s in av_doc.get("slots", []):
-                key = f"{s['start']}-{s['end']}"
-                av_slot_map[key] = s.get("is_closed", False)
+        # สถานะปิดอ่านจาก ManageTimeSlots เท่านั้น — ConsultationAvailability เป็นแค่บันทึกประวัติการตั้งค่า
+        # (เดิมเชื่อสำเนาใน ConsultationAvailability ก่อน ซึ่งค้างเป็น "ปิด" หลังนักศึกษายกเลิกคิว
+        # หรือหลัง Copy ทับวันนั้น แล้วการกดบันทึกซ้ำจะปิด slot จริงโดยไม่ตั้งใจ)
 
         # ดึง booking active ในวันนั้น
         booking_col  = db["BookingOnline"]
@@ -87,8 +78,9 @@ def get_day_slots(date: str, request: Request):
         result_slots = []
         for s in slots:
             key         = f"{s['start']}-{s['end']}"
-            has_booking = key in booked_times
-            is_closed   = av_slot_map.get(key, s.get("is_closed", False))
+            has_booking = key in booked_times or s.get("booked", 0) >= 1
+            # การจองก็ตั้ง is_closed=True — นับเป็น "ปิด" เฉพาะที่อาจารย์ปิดเอง
+            is_closed   = not has_booking and slot_closed_by_advisor(s)
 
             result_slots.append({
                 "start"      : s["start"],
@@ -100,7 +92,7 @@ def get_day_slots(date: str, request: Request):
                 "has_booking": has_booking,
             })
 
-        return {"date": date, "day_closed": day_closed, "slots": result_slots}
+        return {"date": date, "slots": result_slots}
 
     except HTTPException:
         raise
@@ -155,16 +147,18 @@ def save_day_schedule(body: SaveScheduleBody, request: Request):
         updated_ts_slots = []
         for s in existing_slots:
             key         = f"{s['start']}-{s['end']}"
-            has_booking = key in booked_times
+            # slot ที่ถูกจองล็อกไว้ (booked) ก็ห้ามแตะ แม้จะยังไม่เห็นคิวใน BookingOnline
+            has_booking = key in booked_times or s.get("booked", 0) >= 1
 
             if has_booking:
                 updated_ts_slots.append(s)
                 continue
 
-            want_close = True if body.day_closed else slot_map.get(key, s.get("is_closed", False))
+            want_close = slot_map.get(key, slot_closed_by_advisor(s))
 
+            # ปิดใช้แค่ is_closed — ไม่ตั้ง isLocked (ล็อก = มีคนจอง) อาจารย์จึงยังแก้/ลบ slot ที่ปิดไว้ได้
             if want_close:
-                updated_s = {**s, "is_closed": True, "isLocked": True, "booked": 0}
+                updated_s = {**s, "is_closed": True, "isLocked": False, "booked": 0}
             else:
                 updated_s = {k: v for k, v in s.items() if k != "is_closed"}
                 updated_s["isLocked"] = False
@@ -206,7 +200,6 @@ def save_day_schedule(body: SaveScheduleBody, request: Request):
                 "$set": {
                     "advisorId" : advisor_id,
                     "date"      : body.date,
-                    "day_closed": body.day_closed,
                     "slots"     : av_slots,
                     "updatedAt" : now,
                 },
