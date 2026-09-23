@@ -84,6 +84,12 @@ def ensure_booking_indexes(db):
     db["ApprovedHistory"].create_index([("UserId", ASCENDING)])
     db["CancelBookingHistory"].create_index([("cancelledById", ASCENDING)])
     db["QueueManagementHistory"].create_index([("userId", ASCENDING), ("status", ASCENDING)])
+    # แจ้งเตือน: ดึงรายการล่าสุดของผู้ใช้เรียงตามเวลา (GET /Notifications/List)
+    db["QueueManagementHistory"].create_index([("userId", ASCENDING), ("createdAt", DESCENDING)])
+    try:
+        db["NotificationReadState"].create_index([("userId", ASCENDING)], unique=True, name="userId_unique")
+    except Exception:
+        logger.exception("สร้าง unique index NotificationReadState.userId ไม่สำเร็จ")
     # AdvisorStats นับด้วย AdvisorId / advisorName
     db["ApprovedHistory"].create_index([("AdvisorId", ASCENDING), ("Status", ASCENDING)])
     # advisorName ยังไว้ใช้นับประวัติเก่าที่ยังไม่มี advisorId

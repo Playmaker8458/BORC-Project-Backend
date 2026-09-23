@@ -43,6 +43,7 @@ from users.router.Advisor.ChatAdvisor import router as DataApproved_router, clie
 
 
 from users.router.SettingProfile import router as SettingProfile_router
+from users.router.Notifications import router as Notifications_router
 from users.Database.ConnectDB import Connect_MongoDB
 
 
@@ -225,3 +226,7 @@ app.include_router(DataApproved_router, prefix="/Message", tags=["ChatAdvisor"])
 
 
 app.include_router(SettingProfile_router, prefix="/settingProfile", tags=["SettingProfile Student and Advisor"])
+
+# แจ้งเตือนจองคิว/จัดการคิว — ใช้ร่วมกันทั้งนักศึกษาและอาจารย์ (แยกสิทธิ์ด้วย userId ใน token เอง
+# ไม่ผูก require_student/require_advisor ที่ระดับ router เพราะผู้ใช้ทั้งสอง role ต้องเรียกได้)
+app.include_router(Notifications_router, prefix="/Notifications", tags=["Notifications"])
