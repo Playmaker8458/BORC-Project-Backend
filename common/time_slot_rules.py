@@ -11,7 +11,7 @@ from typing import Annotated, Dict, List
 from pydantic import AfterValidator, BaseModel, field_validator, model_validator
 
 # จำนวนช่วงเวลาสูงสุดที่อาจารย์ตั้งได้ต่อวัน (ต้องตรงกับ MAX_SLOTS_PER_DAY ฝั่ง frontend)
-MAX_SLOTS_PER_DAY = 3
+MAX_SLOTS_PER_DAY = 5
 
 # ─────────────────────────────────────────
 # Models
