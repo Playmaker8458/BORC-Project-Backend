@@ -21,6 +21,7 @@ from common.booking_status import CHAT_STATUSES
 from common.chat_limits import ChatInvalid, check_rest_text, chat_rate_ok, parse_ws_text, retry_after_seconds, WS_POLICY_VIOLATION
 
 from common.notify import CHATBOT_INTERNAL_HEADERS, CHATBOT_URL
+from common.chat_unread import get_advisor_unread_counts, mark_chat_read
 
 load_dotenv(override=True)
 router = APIRouter()
@@ -159,6 +160,48 @@ async def get_chat_history(student_id: str, request: Request):
             "text": m.get("text", ""),
             "timestamp": m["timestamp"].replace(tzinfo=timezone.utc).isoformat().replace("+00:00", "Z") if m.get("timestamp") else "",
         } for m in messages]
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Unhandled error")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+# ── GET จำนวนข้อความค้างอ่าน (มุมอาจารย์) — badge ต่อรายชื่อนักศึกษาใน sidebar หน้าแชท ──
+# คืนค่าได้แม้ไม่เคยเปิดห้องแชทกับนักศึกษาคนนั้นเลยในเซสชันนี้ (นับจาก ChatMessages ที่
+# persist ไว้แล้ว ไม่ได้พึ่ง state ในหน่วยความจำของ WebSocket ที่ต่อเฉพาะห้องที่เปิดอยู่)
+@router.get("/chat/unread/students")
+async def get_advisor_chat_unread(request: Request):
+    try:
+        payload = verify_user_token(request)
+        ensure_user_role(payload, "Advisor")
+        advisor_id = get_user_id(payload)
+
+        bookings = await db["BookingOnline"].find(
+            {"AdvisorId": advisor_id, "Status": {"$in": CHAT_STATUSES}}
+        ).to_list(length=100)
+        student_ids = list({b.get("UserId") for b in bookings if b.get("UserId")})
+
+        unread = await get_advisor_unread_counts(db, advisor_id=advisor_id, student_ids=student_ids)
+        return {"unread": unread}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Unhandled error")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+# ── POST มาร์คว่าอ่านแล้ว (มุมอาจารย์) — เรียกตอนเปิดห้องแชทกับนักศึกษาคนนี้
+# ⚠️ ต้องอยู่หลัง /chat/read/mine ของ ChatStudent.py เสมอ (ดูหมายเหตุเรื่องลำดับ include_router
+# ใน main.py — literal "mine" กับ path param {student_id} จำนวน segment เท่ากัน) ──
+@router.post("/chat/read/{student_id}")
+async def mark_advisor_chat_read(student_id: str, request: Request):
+    try:
+        payload = verify_user_token(request)
+        ensure_user_role(payload, "Advisor")
+        advisor_id = get_user_id(payload)
+        await mark_chat_read(db, advisor_id, student_id)
+        return {"message": "ok"}
     except HTTPException:
         raise
     except Exception as e:

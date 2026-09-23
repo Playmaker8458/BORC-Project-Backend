@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager, suppress
 from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from common.booking_worker import auto_update_status
+from common.chat_unread import ensure_chat_indexes
 from common.indexes import ensure_booking_indexes, ensure_unique_indexes
 from common.origin_guard import OriginGuardMiddleware
 from common.security_headers import SecurityHeadersMiddleware, docs_kwargs
@@ -39,7 +40,7 @@ from users.router.Advisor.Reschedule_Advisor import router as RecheduleAdvisor_r
 from users.router.Advisor.Show_Consult import router as ShowConsult_router
 from users.router.Advisor.ConsultationAvailability import router as ConsultationAvailability_router
 from users.router.Advisor.QueuehistoryAdvisor import router as QueuehistoryAdvisor_router
-from users.router.Advisor.ChatAdvisor import router as DataApproved_router, client as chat_mongo_client
+from users.router.Advisor.ChatAdvisor import router as DataApproved_router, client as chat_mongo_client, db as chat_db
 
 
 from users.router.SettingProfile import router as SettingProfile_router
@@ -67,6 +68,11 @@ async def lifespan(app: FastAPI):
         ensure_unique_indexes(client["BORC"])
     except Exception:
         logging.exception("booking status worker startup failed")
+
+    try:
+        await ensure_chat_indexes(chat_db)  # AsyncMongoClient แยกจาก client ด้านบน
+    except Exception:
+        logging.exception("chat index startup failed")
 
     worker = asyncio.create_task(booking_status_worker())
     try:

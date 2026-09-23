@@ -10,6 +10,7 @@ from starlette import status as ws_status
 from users.auth.authUser import ensure_user_role, verify_user_token, get_user_id
 from common.booking_status import CHAT_STATUSES
 from common.chat_limits import ChatInvalid, chat_rate_ok, parse_ws_text, WS_POLICY_VIOLATION
+from common.chat_unread import SENDER_FROM_ADVISOR, get_last_read_at, get_unread_count, mark_chat_read
 
 # ⚠️ ปรับ path import ให้ตรงกับตำแหน่งไฟล์ advisor_chat.py จริงในโปรเจกต์
 from ..Advisor.ChatAdvisor import (
@@ -93,6 +94,55 @@ async def get_my_chat_history(request: Request):
             "text": m.get("text", ""),
             "timestamp": m["timestamp"].replace(tzinfo=timezone.utc).isoformat().replace("+00:00", "Z") if m.get("timestamp") else "",
         } for m in messages]
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Unhandled error")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+# ── GET จำนวนข้อความค้างอ่าน (มุมนักศึกษา) — badge ที่รายชื่ออาจารย์ใน sidebar หน้าแชท ──
+# คืนค่าได้แม้ไม่เคยเปิดห้องแชทนี้เลยในเซสชันนี้ (ไม่ต้องต่อ WebSocket ก่อน) เพราะนับจาก
+# ChatMessages ที่ persist ไว้แล้วจริง ไม่ได้พึ่ง state ในหน่วยความจำของ WebSocket
+@router.get("/chat/unread/mine")
+async def get_my_chat_unread(request: Request):
+    try:
+        payload = verify_user_token(request)
+        ensure_user_role(payload, "Student")
+        student_id = get_user_id(payload)
+
+        advisor_id = await resolve_advisor_id_for_student(student_id)
+        if not advisor_id:
+            return {"unread": {}}
+
+        last_read_at = await get_last_read_at(db, student_id, advisor_id)
+        count = await get_unread_count(
+            db,
+            student_id=student_id,
+            advisor_id=advisor_id,
+            other_sender_values=SENDER_FROM_ADVISOR,
+            last_read_at=last_read_at,
+        )
+        return {"unread": {advisor_id: count}}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Unhandled error")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+# ── POST มาร์คว่าอ่านแล้ว (มุมนักศึกษา) — เรียกตอนเปิดห้องแชทกับอาจารย์คนนี้ ──
+@router.post("/chat/read/mine")
+async def mark_my_chat_read(request: Request):
+    try:
+        payload = verify_user_token(request)
+        ensure_user_role(payload, "Student")
+        student_id = get_user_id(payload)
+
+        advisor_id = await resolve_advisor_id_for_student(student_id)
+        if advisor_id:
+            await mark_chat_read(db, student_id, advisor_id)
+        return {"message": "ok"}
     except HTTPException:
         raise
     except Exception as e:
