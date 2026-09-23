@@ -6,14 +6,43 @@ watermark "อ่านถึงเวลาไหนแล้ว" ต่อค�
 common/notifications.py (NotificationReadState) นับ unread จาก ChatMessages ที่ timestamp
 ใหม่กว่า watermark และผู้ส่งไม่ใช่ตัวผู้อ่านเอง
 
+จำกัดไม่ให้นับข้ามวัน (ดู _effective_since): บทสนทนาที่คุยจบไปแล้วเมื่อวาน (ไม่มีใคร mark-read
+ไว้เพราะฟีเจอร์นี้เพิ่งมี) จะไม่โผล่เป็น unread ใหม่วันนี้ — badge/แจ้งเตือนแสดงเฉพาะข้อความของ
+"วันนี้" เท่านั้น (ตามเวลาไทย UTC+7) ผลข้างเคียงที่ตั้งใจ: ข้อความที่ยังไม่ได้อ่านข้ามเที่ยงคืนไป
+จะหายจาก badge ทันทีที่ขึ้นวันใหม่ แม้จะยังไม่ได้เปิดอ่านจริงก็ตาม
+
 ทำงานกับ AsyncMongoClient (db ของ ChatAdvisor.py/ChatStudent.py) จึงเป็น async ทั้งไฟล์
 ต่างจาก common/notifications.py ที่ใช้ sync pymongo — คนละ client กัน
 """
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 SENDER_FROM_ADVISOR = ["teacher", "advisor"]
 SENDER_FROM_STUDENT = ["student"]
+
+_TZ_UTC7 = timezone(timedelta(hours=7))
+
+
+def _start_of_today_utc() -> datetime:
+    """เที่ยงคืนของ "วันนี้" ตามเวลาไทย (UTC+7) แปลงกลับเป็น UTC แบบ naive (ไม่มี tzinfo)
+    ให้ตรงกับที่ pymongo คืนค่า timestamp/lastReadAt กลับมาจาก DB (BSON datetime ไม่มี tz
+    ติดมาด้วย — ของเดิมในไฟล์นี้ก็ถือว่าเป็น UTC เสมอโดยไม่ใส่ tzinfo อยู่แล้ว)
+    """
+    now_utc7 = datetime.now(_TZ_UTC7)
+    start_utc7 = now_utc7.replace(hour=0, minute=0, second=0, microsecond=0)
+    return start_utc7.astimezone(timezone.utc).replace(tzinfo=None)
+
+
+def _effective_since(last_read_at):
+    """จุดเริ่มนับ unread: ไม่นับข้อความเก่าข้ามวัน (บทสนทนาที่จบไปแล้วเมื่อวาน ไม่ควรโผล่เป็น unread
+    ใหม่วันนี้) และครอบคลุมกรณีไม่เคย mark-read มาก่อนเลย (เดิมนับข้อความทั้งประวัติ ถ้าไม่มี watermark
+    เลย จะกลายเป็น unread พรวดเดียวทั้งหมดตอนเปิดใช้ฟีเจอร์นี้ครั้งแรก) ใช้ค่าที่ "ใหม่กว่า" ระหว่าง
+    watermark จริงกับเที่ยงคืนวันนี้เสมอ
+    """
+    today_start = _start_of_today_utc()
+    if last_read_at and last_read_at > today_start:
+        return last_read_at
+    return today_start
 
 
 async def get_last_read_at(db, reader_id: str, counterpart_id: str):
@@ -26,9 +55,8 @@ async def get_unread_count(db, *, student_id: str, advisor_id: str, other_sender
         "student_id": student_id,
         "advisor_id": advisor_id,
         "sender": {"$in": other_sender_values},
+        "timestamp": {"$gt": _effective_since(last_read_at)},
     }
-    if last_read_at:
-        query["timestamp"] = {"$gt": last_read_at}
     return await db["ChatMessages"].count_documents(query)
 
 
@@ -50,14 +78,15 @@ async def get_advisor_unread_counts(db, *, advisor_id: str, student_ids: list[st
     last_read_by_student = {r["counterpartId"]: r.get("lastReadAt") for r in read_states}
 
     # เงื่อนไข timestamp ต่างกันตาม watermark ของแต่ละนักศึกษา จึงประกอบเป็น $or ต่อคน
-    # แล้วนับรวมด้วย aggregation รอบเดียว แทนการ count_documents ทีละคน
+    # แล้วนับรวมด้วย aggregation รอบเดียว แทนการ count_documents ทีละคน (ไม่นับข้ามวัน — ดู
+    # _effective_since ด้านบน)
     or_conditions = []
     for student_id in student_ids:
-        condition: dict = {"student_id": student_id}
         last_read_at = last_read_by_student.get(student_id)
-        if last_read_at:
-            condition["timestamp"] = {"$gt": last_read_at}
-        or_conditions.append(condition)
+        or_conditions.append({
+            "student_id": student_id,
+            "timestamp": {"$gt": _effective_since(last_read_at)},
+        })
 
     pipeline = [
         {"$match": {
