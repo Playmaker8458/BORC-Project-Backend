@@ -67,7 +67,12 @@ async def get_advisor_unread_counts(db, *, advisor_id: str, student_ids: list[st
         }},
         {"$group": {"_id": "$student_id", "count": {"$sum": 1}}},
     ]
-    rows = await db["ChatMessages"].aggregate(pipeline).to_list(length=len(student_ids))
+    # ต่างจาก .find() (คืน cursor ทันทีแบบ sync) — .aggregate() ของ AsyncMongoClient เป็น
+    # coroutine ต้อง await ก่อนถึงจะได้ cursor คืนมา (เดิมเรียก .to_list() ต่อท้ายทันทีโดยไม่ await
+    # aggregate() ก่อน ได้ coroutine object ที่ไม่มี .to_list() → AttributeError → endpoint จับ
+    # exception แล้วตอบ 500 → badge ฝั่งอาจารย์เลยไม่ขึ้นเลยสักครั้ง ทั้งที่ query ถูกต้อง)
+    cursor = await db["ChatMessages"].aggregate(pipeline)
+    rows = await cursor.to_list(length=len(student_ids))
     counts = {row["_id"]: row["count"] for row in rows}
     return {student_id: counts.get(student_id, 0) for student_id in student_ids}
 
