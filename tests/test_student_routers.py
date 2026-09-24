@@ -285,6 +285,42 @@ def test_reschedule_booking_success_books_new_slot_and_releases_old(rs_client, m
     assert mongo_client["BORC"]["RescheduleHistory"].count_documents({"rescheduledByRole": "Student"}) == 1
 
 
+def test_reschedule_booking_succeeds_even_if_history_write_fails(rs_client, mongo_client, monkeypatch):
+    """คิวถูกเลื่อนไปแล้วใน DB จริง — พลาดตอนเขียนประวัติ (เช่น DB สะดุด) ต้องไม่ทำให้ตอบ 500
+    ทั้งที่เลื่อนคิวสำเร็จแล้ว (เดิมเป็นบั๊ก แก้เหมือน ManageQueueStudent.py ตอนยกเลิกคิว)"""
+    from users.router.Students import Reschedule_Students as rs
+
+    _seed_user(mongo_client, "student-1")
+    _insert_booking(mongo_client, Status="Approved", RescheduledOnce=False, AdvisorId="advisor-1", Date="2099-01-01", Time="09:00-10:00")
+    mongo_client["BORC"]["ManageTimeSlots"].insert_one({
+        "advisorId": "advisor-1",
+        "dates": {
+            "2099-01-01": [{"start": "09:00", "end": "10:00", "booked": 1, "isLocked": True, "is_closed": True}],
+            "2099-02-01": [{"start": "10:00", "end": "11:00", "booked": 0, "max_booking": 1, "isLocked": False, "is_closed": False}],
+        },
+    })
+    monkeypatch.setattr(
+        rs, "log_queue_management_history",
+        lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("mongo write failed")),
+    )
+
+    resp = rs_client.put(
+        "/RescheduleBooking",
+        data={
+            "new_date": "2099-02-01",
+            "new_start": "10:00",
+            "new_end": "11:00",
+            "new_label": "MORNING",
+            "reason": "ติดธุระ",
+        },
+        cookies=_cookies("student-1"),
+    )
+
+    assert resp.status_code == 200
+    booking = mongo_client["BORC"]["BookingOnline"].find_one({"UserId": "student-1"})
+    assert booking["Status"] == "Rescheduled"
+
+
 # ── Show_BookingData ───────────────────────────────────────────────────────────
 
 @pytest.fixture

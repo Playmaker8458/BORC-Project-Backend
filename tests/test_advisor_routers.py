@@ -391,17 +391,46 @@ def qha_client(qha_app):
 
 def test_advisor_history_returns_only_own_records(qha_client, mongo_client):
     _seed_user(mongo_client, "advisor-1")
+    mongo_client["BORC"]["ApprovedHistory"].insert_many([
+        {"AdvisorId": "advisor-1", "StudentName": "นศ.เอ", "Status": "Approved"},
+        {"AdvisorId": "advisor-2", "StudentName": "นศ.บี", "Status": "Approved"},
+    ])
     mongo_client["BORC"]["QueueManagementHistory"].insert_many([
-        {"userId": "advisor-1", "status": "Approved"},
-        {"userId": "advisor-2", "status": "Cancelled"},
+        {"userId": "advisor-1", "status": "Completed"},
+        {"userId": "advisor-2", "status": "Completed"},
     ])
 
     resp = qha_client.get("/All", cookies=_cookies("advisor-1"))
 
     assert resp.status_code == 200
     data = resp.json()["data"]
-    assert len(data) == 1
-    assert data[0]["status"] == "Approved"
+    assert len(data) == 2
+    assert {item["status"] for item in data} == {"Approved", "Completed"}
+
+
+def test_advisor_history_includes_student_initiated_events(qha_client, mongo_client):
+    """เดิม endpoint นี้ query แค่ QueueManagementHistory ที่เดียว (เพิ่งถูกเติมข้อมูลให้ครบทีหลัง)
+    ทำให้เหตุการณ์เก่าที่บันทึกไว้แค่ใน ApprovedHistory/RescheduleHistory/CancelBookingHistory
+    หายไปจากประวัติของอาจารย์ — เหมือนบั๊กที่เคยแก้ไปแล้วฝั่ง QueuehistoryStudent.py"""
+    _seed_user(mongo_client, "advisor-1")
+    mongo_client["BORC"]["ApprovedHistory"].insert_one({
+        "AdvisorId": "advisor-1", "StudentName": "นศ.เอ", "Status": "Approved",
+    })
+    mongo_client["BORC"]["CancelBookingHistory"].insert_one({
+        "advisorId": "advisor-1", "cancelledByRole": "Student",
+        "studentName": "นศ.เอ", "status": "Cancelled", "cancelReason": "ติดธุระ",
+    })
+    mongo_client["BORC"]["RescheduleHistory"].insert_one({
+        "advisorId": "advisor-1", "rescheduledById": "student-1",
+        "rescheduledByRole": "Student", "studentName": "นศ.เอ", "status": "Rescheduled",
+    })
+
+    resp = qha_client.get("/All", cookies=_cookies("advisor-1"))
+
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    assert {item["status"] for item in data} == {"Approved", "Cancelled", "Rescheduled"}
+    assert all(item["UserName"] == "นศ.เอ" for item in data)
 
 
 # ── Reschedule_Advisor ────────────────────────────────────────────────────────────
@@ -484,6 +513,41 @@ def test_reschedule_booking_success(ra_client, mongo_client, monkeypatch):
     booking = mongo_client["BORC"]["BookingOnline"].find_one({"UserId": "student-1"})
     assert booking["Status"] == "Rescheduled"
     assert booking["AdvisorRescheduledOnce"] is True
+
+
+def test_reschedule_booking_succeeds_even_if_history_write_fails(ra_client, mongo_client, monkeypatch):
+    """คิวถูกเลื่อนไปแล้วใน DB จริง — พลาดตอนเขียนประวัติ (เช่น DB สะดุด) ต้องไม่ทำให้ตอบ 500
+    ทั้งที่เลื่อนคิวสำเร็จแล้ว (เดิมเป็นบั๊ก แก้เหมือน ManageQueueStudent.py ตอนยกเลิกคิว)"""
+    from users.router.Advisor import Reschedule_Advisor as ra
+
+    _seed_user(mongo_client, "advisor-1")
+    _insert_booking(mongo_client, AdvisorId="advisor-1", Status="Approved", AdvisorRescheduledOnce=False, Date="2099-01-01", Time="09:00-10:00")
+
+    mongo_client["BORC"]["ManageTimeSlots"].insert_one({
+        "advisorId": "advisor-1",
+        "dates": {"2099-02-01": [{"start": "10:00", "end": "11:00", "max_booking": 1, "booked": 0,
+                                  "isLocked": False, "is_closed": False}]},
+    })
+
+    class _FakeResp:
+        def json(self):
+            return {"ok": True}
+
+    monkeypatch.setattr(requests, "post", lambda *a, **kw: _FakeResp())
+    monkeypatch.setattr(
+        ra, "log_queue_management_history",
+        lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("mongo write failed")),
+    )
+
+    resp = ra_client.put(
+        "/RescheduleBooking",
+        json={"user_id": "student-1", "new_date": "2099-02-01", "new_start": "10:00", "new_end": "11:00", "reason": "ติดธุระ"},
+        cookies=_cookies("advisor-1"),
+    )
+
+    assert resp.status_code == 200
+    booking = mongo_client["BORC"]["BookingOnline"].find_one({"UserId": "student-1"})
+    assert booking["Status"] == "Rescheduled"
 
 
 def test_reschedule_booking_rejects_date_without_slot(ra_client, mongo_client):

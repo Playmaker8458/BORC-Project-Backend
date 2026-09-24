@@ -239,7 +239,9 @@ BUDGET = {
     "advisor SaveDaySchedule": 5,
     "advisor TodayQueue": 2,
     "advisor AdvisorStats": 5,
-    "advisor QueuehistoryAdvisor All": 2,
+    # 5 เท่ากับ "student History" (auth + 4 collection ขนาน — ก่อนแก้บั๊กประวัติไม่ครบเคยพึ่ง
+    # collection เดียวเลยงบต่ำกว่าจริง)
+    "advisor QueuehistoryAdvisor All": 5,
 }
 
 

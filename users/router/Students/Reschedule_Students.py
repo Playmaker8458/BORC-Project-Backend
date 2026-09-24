@@ -15,7 +15,9 @@ from common.slot_service import (
 )
 from common.booking_status import ACTIVE_STATUSES
 from common.notify import CHATBOT_INTERNAL_HEADERS, CHATBOT_URL, notify_chatbot
+from common.parallel import run_parallel
 from common.queue_history import log_queue_management_history
+from common.reschedule_history import insert_reschedule_history
 
 
 router = APIRouter()
@@ -168,28 +170,6 @@ def _load_reschedulable_booking(db, user_id: str) -> tuple[dict, str, str]:
     return booking, old_start, old_end
 
 
-def _insert_reschedule_history(db, user_id, booking, data, old_start, old_end, now) -> None:
-    db["RescheduleHistory"].insert_one({
-        "rescheduledById"  : user_id,
-        "rescheduledByRole": "Student",
-        "bookingId"        : str(booking["_id"]),
-        "advisorId"        : booking.get("AdvisorId", ""),
-        "advisorName"      : booking.get("Advisor_Name", ""),
-        "studentName"      : booking.get("StudentName", ""),
-        "oldDate"          : booking.get("Date", ""),
-        "oldStart"         : old_start,
-        "oldEnd"           : old_end,
-        "newDate"          : data.new_date,
-        "newStart"         : data.new_start,
-        "newEnd"           : data.new_end,
-        "newLabel"         : data.new_label,
-        "rescheduledReason": data.reason,
-        "status"           : "Rescheduled",
-        "createdAt"        : now,
-        "updatedAt"        : now,
-    })
-
-
 @router.put("/RescheduleBooking")
 def reschedule_booking(request: Request, background_tasks: BackgroundTasks, data: RescheduleForm = Depends()):
     try:
@@ -232,8 +212,6 @@ def reschedule_booking(request: Request, background_tasks: BackgroundTasks, data
         ):
             raise HTTPException(status_code=409, detail="สถานะคิวเปลี่ยนไปแล้ว กรุณารีเฟรชหน้าแล้วลองใหม่อีกครั้ง")
 
-        _insert_reschedule_history(db, user_id, booking, data, old_start, old_end, now)
-
         # แจ้งอาจารย์ว่านักศึกษาเลื่อนคิว (background — ไม่บล็อก event loop)
         background_tasks.add_task(
             notify_chatbot,
@@ -248,16 +226,38 @@ def reschedule_booking(request: Request, background_tasks: BackgroundTasks, data
             CHATBOT_INTERNAL_HEADERS,
         )
 
-        log_queue_management_history(
-            db,
-            advisor_id=advisor_id,
-            advisor_name=advisor_name,
-            student_id=user_id,
-            student_name=student_name,
-            status="Rescheduled",
-            reason=data.reason,
-            now=now,
-        )
+        # คิวถูกเลื่อนไปแล้วใน DB (move_booking_to_slot สำเร็จ) — งานต่อจากนี้ (เขียนประวัติ 2 รายการ)
+        # ห้ามทำให้ request ล้ม ไม่งั้นจะตอบ 500 ทั้งที่เลื่อนคิวสำเร็จแล้ว (เหมือนที่แก้ไปแล้วใน
+        # ManageQueueStudent.py ตอนยกเลิกคิว)
+        try:
+            run_parallel(
+                lambda: insert_reschedule_history(
+                    db,
+                    rescheduled_by_id=user_id,
+                    rescheduled_by_role="Student",
+                    booking=booking,
+                    new_date=data.new_date,
+                    new_start=data.new_start,
+                    new_end=data.new_end,
+                    new_label=data.new_label,
+                    reason=data.reason,
+                    old_start=old_start,
+                    old_end=old_end,
+                    now=now,
+                ),
+                lambda: log_queue_management_history(
+                    db,
+                    advisor_id=advisor_id,
+                    advisor_name=advisor_name,
+                    student_id=user_id,
+                    student_name=student_name,
+                    status="Rescheduled",
+                    reason=data.reason,
+                    now=now,
+                ),
+            )
+        except Exception:
+            logger.exception("[RescheduleBooking] เลื่อนคิว %s แล้ว แต่เขียนประวัติไม่สำเร็จ", booking["_id"])
 
         return {"message": "เลื่อนคิวสำเร็จ"}
 
