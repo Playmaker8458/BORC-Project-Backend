@@ -1,16 +1,17 @@
+import os
+from dotenv import load_dotenv
 import asyncio
 import logging
 from contextlib import asynccontextmanager, suppress
 from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+
 from common.booking_worker import auto_update_status
 from common.chat_unread import ensure_chat_indexes
 from common.indexes import ensure_booking_indexes, ensure_unique_indexes
 from common.origin_guard import OriginGuardMiddleware
 from common.security_headers import SecurityHeadersMiddleware, docs_kwargs
 from common.auth_errors import register_auth_error_handlers
-from dotenv import load_dotenv
-import os
 
 load_dotenv(override=True)
 
