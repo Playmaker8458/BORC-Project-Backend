@@ -8,6 +8,7 @@ from common.chat_unread import ensure_chat_indexes
 from common.indexes import ensure_booking_indexes, ensure_unique_indexes
 from common.origin_guard import OriginGuardMiddleware
 from common.security_headers import SecurityHeadersMiddleware, docs_kwargs
+from common.auth_errors import register_auth_error_handlers
 from dotenv import load_dotenv
 import os
 
@@ -89,6 +90,7 @@ async def lifespan(app: FastAPI):
 # ปิด /docs /redoc /openapi.json บน production (เปิดกลับด้วย env ENABLE_DOCS=true เมื่อต้องดีบัก)
 _DOCS = docs_kwargs(is_prod=os.getenv("ENV") == "production", enable_docs=os.getenv("ENABLE_DOCS"))
 app = FastAPI(lifespan=lifespan, **_DOCS)
+register_auth_error_handlers(app)
 
 # ── Rate limiting (slowapi) ────────────────────────────────────────────────
 # ใช้ limiter ตัวเดียวกับที่ authAdmin.py / authUser.py ใช้ (common/rate_limit.py)

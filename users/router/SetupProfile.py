@@ -144,8 +144,17 @@ async def AddDataProfile(
     response: Response,
     session: dict = Depends(verify_pending_or_active_user),
 ):
-    if session.get("user_id") != data.userID or not session.get("registration"):
+    if session.get("user_id") != data.userID:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="session สำหรับลงทะเบียนไม่ถูกต้อง")
+
+    # verify_pending_or_active_user ปล่อยผ่านได้ 2 แบบ: registration token (ผู้ใช้ใหม่)
+    # หรือ token เต็มของผู้ใช้ที่มีข้อมูลใน DB แล้ว — แบบหลังแปลว่าสมัครไปแล้ว
+    # จึงตอบ 409 (สมัครซ้ำ) แทน 403 เพื่อให้ frontend แยกจาก "session ผิด" ได้
+    if not session.get("registration"):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="มีข้อมูลผู้ใช้นี้อยู่ในระบบแล้ว",
+        )
 
     myclient = Connect_MongoDB()
     try:

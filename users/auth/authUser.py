@@ -40,7 +40,13 @@ IS_PROD = os.getenv("ENV") == "production"
 
 ALGORITHM = "HS256"
 COOKIE_NAME = "access_token"
-SESSION_MAX_AGE = timedelta(days=1)
+# อายุ session: JWT และ cookie ต้องใช้ค่าเดียวกันเสมอ เมื่อครบ 24 ชั่วโมง
+# ทั้ง cookie (เบราว์เซอร์ลบเอง) และ JWT (decode_token ปฏิเสธ) จะหมดอายุพร้อมกัน
+# แล้วผู้ใช้ต้องเข้าสู่ระบบใหม่
+SESSION_MAX_AGE = timedelta(hours=24)
+# token ชั่วคราวของผู้ใช้ใหม่ที่กำลังกรอกฟอร์ม ProfileSetup (เดิม 15 นาที
+# แต่ cookie อยู่ 1 วัน ทำให้ cookie ยังอยู่แต่ JWT หมดอายุแล้ว → 401 ตอนกดบันทึก)
+REGISTRATION_MAX_AGE = timedelta(hours=24)
 JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY")
 
 if not JWT_SECRET_KEY:
@@ -105,20 +111,41 @@ def get_UserDB(UUID: str) -> dict | None:
 # Create User Session
 # ============================================================
 
-def set_user_session(request: Request, response: Response, token: str):
+def set_user_session(
+    request: Request,
+    response: Response,
+    token: str,
+    max_age: timedelta = SESSION_MAX_AGE,
+):
     """
     สร้าง HttpOnly Cookie
     สำหรับเก็บ JWT Session
+
+    max_age ต้องตรงกับอายุของ JWT ที่ส่งเข้ามา เพื่อไม่ให้ cookie ค้างอยู่
+    หลังที่ token ข้างในหมดอายุแล้ว
     """
 
     response.set_cookie(
         key=COOKIE_NAME,
         value=token,
         httponly=True,
-        max_age=int(SESSION_MAX_AGE.total_seconds()),
+        max_age=int(max_age.total_seconds()),
         path="/",
         **_cookie_security_flags(request),
     )
+
+
+def _clear_session_headers(request: Request) -> dict:
+    """header Set-Cookie ที่สั่งลบ session cookie — แนบไปกับ 401 เพื่อบังคับออกจากระบบทันที"""
+
+    tmp = Response()
+    tmp.delete_cookie(
+        key=COOKIE_NAME,
+        httponly=True,
+        path="/",
+        **_cookie_security_flags(request),
+    )
+    return {"Set-Cookie": tmp.headers["set-cookie"]}
 
 
 # ============================================================
@@ -204,9 +231,12 @@ def verify_user_token(request: Request):
         }
 
     except JWTError:
+        # Token หมดอายุ (ครบ 24 ชม.) หรือไม่ถูกต้อง → ลบ cookie ทิ้งพร้อมตอบ 401
+        # ให้ frontend พาไปหน้า login ทันที ไม่ค้างด้วย cookie เสียที่ส่งซ้ำไปเรื่อย ๆ
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Token ไม่ถูกต้อง หรือหมดอายุ",
+            detail="เซสชันหมดอายุ กรุณาเข้าสู่ระบบใหม่",
+            headers=_clear_session_headers(request),
         )
 
 def _require_role(request: Request, role: str, detail: str) -> dict:
@@ -302,7 +332,8 @@ def verify_pending_or_active_user(request: Request):
     except JWTError:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Token ไม่ถูกต้องหรือหมดอายุ",
+            detail="เซสชันหมดอายุ กรุณาเข้าสู่ระบบใหม่",
+            headers=_clear_session_headers(request),
         )
 
     user_id = payload.get("user_id")
@@ -364,12 +395,13 @@ def Line_Login(request: Request, data: LineAuthCode, response: Response):
                     "user_id": line_user_id,
                     "registration": True,
                 },
-                timedelta(minutes=15),
+                REGISTRATION_MAX_AGE,
             )
 
-            set_user_session(request, response, registration_token)
+            set_user_session(request, response, registration_token, REGISTRATION_MAX_AGE)
 
             return {
+                "isNewUser": True,
                 "Role": None,
                 "Status": None,
                 "lineUserId": line_user_id,
@@ -426,6 +458,7 @@ def Line_Login(request: Request, data: LineAuthCode, response: Response):
         set_user_session(request, response, access_token_jwt)
 
         return {
+            "isNewUser": False,
             "userId": db_user.get("userId", line_user_id),
             "Role": db_user.get("Role"),
             "Status": db_user.get("Status"),

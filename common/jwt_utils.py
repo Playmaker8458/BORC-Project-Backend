@@ -58,7 +58,17 @@ def decode_token(token: str) -> dict:
     # verify_iat=False: คงพฤติกรรมเดิมของ python-jose (ไม่ปฏิเสธ token ที่ iat ล้ำหน้านาฬิกาของเครื่องนี้)
     # กัน instance ที่นาฬิกาเร็ว/ช้ากว่ากันปฏิเสธ token ของกันและกัน; exp ยังตรวจตามปกติ
     # algorithms ระบุ HS256 เท่านั้น จึงปฏิเสธ alg=none และอัลกอริทึมอื่น
-    return jwt.decode(token, _get_secret_key(), algorithms=[ALGORITHM], options={"verify_iat": False})
+    #
+    # require=["exp"]: token ต้องมี exp เสมอ — PyJWT ตรวจ exp เฉพาะ token ที่ "มี" claim นี้
+    # ถ้าไม่บังคับ token ที่ไม่มี exp จะไม่มีวันหมดอายุ ทำให้กติกา "session อยู่ได้ 24 ชั่วโมงแล้ว
+    # ต้อง login ใหม่" ถูกเลี่ยงได้ (token ที่ออกจาก encode_token ด้านบนมี exp ทุกใบอยู่แล้ว
+    # จึงไม่กระทบ session ที่ใช้งานอยู่)
+    return jwt.decode(
+        token,
+        _get_secret_key(),
+        algorithms=[ALGORITHM],
+        options={"verify_iat": False, "require": ["exp"]},
+    )
 
 
 __all__ = ["encode_token", "decode_token", "ALGORITHM", "JWTError"]
