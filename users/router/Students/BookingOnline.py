@@ -7,6 +7,7 @@ import requests as req
 from dotenv import load_dotenv
 from pymongo.errors import DuplicateKeyError
 from common.booking_status import ACTIVE_STATUSES
+from common.department_scope import advisor_ids_in_department, assert_same_department, get_user_department
 from common.slot_service import (
     cutoff_datetime,
     get_now_utc7,
@@ -76,7 +77,6 @@ def find_slot_doc_for_date(db, advisor_id: str, date: str):
         f"dates.{date}" : {"$exists": True},
     })
 
-
 def _slot_view(s: dict, date: str, today: str, now: datetime) -> dict:
     """รูปแบบ slot ที่ส่งให้หน้าจอง พร้อมสถานะปิด/เต็ม/เลยเวลา
 
@@ -101,22 +101,25 @@ def _slot_view(s: dict, date: str, today: str, now: datetime) -> dict:
 def get_available_advisors(request: Request):
     """ดึงรายชื่ออาจารย์ที่มี slot ว่างตั้งแต่วันนี้เป็นต้นไป"""
     try:
-        verify_user_token(request)
-        db       = get_db()
-        now_utc7 = get_now_utc7()
-        today    = now_utc7.strftime("%Y-%m-%d")
+        payload    = verify_user_token(request)
+        db         = get_db()
+        department = get_user_department(db, get_user_id(payload))
+        now_utc7   = get_now_utc7()
+        today      = now_utc7.strftime("%Y-%m-%d")
 
         all_docs = list(db["ManageTimeSlots"].find(
             {},
             {"_id": 0, "advisor_name": 1, "advisorId": 1, "dates": 1}
         ))
         blocked = unavailable_advisor_ids(db, (d.get("advisorId", "") for d in all_docs))
+        # เฉพาะอาจารย์สาขาเดียวกับผู้เรียก
+        allowed = advisor_ids_in_department(db, department, (d.get("advisorId", "") for d in all_docs))
 
         advisors: dict = {}
         for doc in all_docs:
             advisor_id = doc.get("advisorId", "")
             name       = doc.get("advisor_name", "")
-            if not advisor_id or not name or advisor_id in blocked:
+            if not advisor_id or not name or advisor_id in blocked or advisor_id not in allowed:
                 continue
 
             entry = advisors.setdefault(advisor_id, {"name": name, "has_available": False})
@@ -145,8 +148,9 @@ def get_available_advisors(request: Request):
 def get_available_slots(advisor_id: str, request: Request):
     """ดึง slot ทั้งหมดของอาจารย์ พร้อมสถานะว่าง/ถูกจอง"""
     try:
-        verify_user_token(request)
+        payload  = verify_user_token(request)
         db       = get_db()
+        assert_same_department(db, get_user_id(payload), advisor_id)
         now_utc7 = get_now_utc7()
         today    = now_utc7.strftime("%Y-%m-%d")
 
@@ -336,6 +340,8 @@ def create_booking(
         attachment = _validate_attachment(file)
 
         db = get_db()
+        # อาจารย์ต้องอยู่สาขาเดียวกับนักศึกษา (เช็คก่อนเก็บไฟล์/ล็อก slot)
+        assert_same_department(db, user_id, data.advisor_id)
         # ไม่เรียก auto_update_status ตรงนี้: background worker (main.booking_status_worker) ทำทุก 30 วินาทีอยู่แล้ว
         # เดิมคำขอจองต้องรอสแกนคิวทั้งระบบ + ยิงแจ้งเตือน LINE (timeout 5 วินาทีต่อรายการ) ก่อนได้ตอบ
 
@@ -453,3 +459,5 @@ def get_booking_status(request: Request):
     except Exception as e:
         logger.exception("Unhandled error")
         raise HTTPException(status_code=500, detail="Internal server error")
+    except:
+        pass
