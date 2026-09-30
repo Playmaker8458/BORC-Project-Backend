@@ -321,14 +321,6 @@ def verify_pending_or_active_user(request: Request):
     token = request.cookies.get(COOKIE_NAME)
 
     if not token:
-        logger.warning(
-            "[auth] verify_pending_or_active_user: no %s cookie (cookie_names=%s xfp=%r scheme=%s ua=%s)",
-            COOKIE_NAME,
-            list(request.cookies.keys()),
-            request.headers.get("x-forwarded-proto"),
-            request.url.scheme,
-            request.headers.get("user-agent", "")[:80],
-        )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="กรุณาเข้าสู่ระบบ",
@@ -337,15 +329,7 @@ def verify_pending_or_active_user(request: Request):
     try:
         payload = decode_token(token)
 
-    except JWTError as exc:
-        # ชื่อชนิด exception บอกสาเหตุจริง: ExpiredSignatureError = หมดอายุ,
-        # InvalidSignatureError = secret ไม่ตรง (คนละ env / instance) — ไม่ log ตัว token
-        logger.warning(
-            "[auth] verify_pending_or_active_user: JWT rejected: %s (xfp=%r ua=%s)",
-            type(exc).__name__,
-            request.headers.get("x-forwarded-proto"),
-            request.headers.get("user-agent", "")[:80],
-        )
+    except JWTError:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="เซสชันหมดอายุ กรุณาเข้าสู่ระบบใหม่",
