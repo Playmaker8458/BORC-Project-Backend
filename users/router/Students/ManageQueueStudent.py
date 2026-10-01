@@ -26,15 +26,13 @@ chatbot_uri = CHATBOT_URL
 
 
 class CancelBookingRequest(BaseModel):
-    cancelReason: str = ""
+    cancelReason: str
 
 
 # ─── Cutoff helper ────────────────────────────────────────────────────────────
 # นักศึกษายกเลิก/เลื่อนคิวถูกล็อกทั้งก่อนและหลังเวลานัด 1 ชม. (พฤติกรรมเดิมของไฟล์นี้)
 # จึงใช้ฟังก์ชันหน้าต่างเวลาตัวเดียวกับฝั่งอาจารย์ใน common/slot_service.py
 is_within_cutoff = is_within_advisor_cutoff_window
-
-
 
 
 
@@ -232,7 +230,13 @@ def cancel_booking(request: Request, body: CancelBookingRequest, background_task
         # แจ้งเตือนยกเลิกการจองของนักศึกษาส่งให้กับ อาจารย์ (background — ไม่บล็อก event loop)
         notify_chatbot(
             url=f"{chatbot_uri}/NotifyCancelled/CancelBookingAdvisor", 
-            payload={"AdvisorId": advisor_id, "StudentName":booking.get("StudentName", ""), "Date": date, "Time": time_str}, 
+            payload={
+                "AdvisorId": advisor_id, 
+                "StudentName":booking.get("StudentName", ""), ""
+                "Date": date, 
+                "Time": time_str, 
+                "CancelReason": body.cancelReason.strip()
+            }, 
             headers=CHATBOT_INTERNAL_HEADERS
         )
 
