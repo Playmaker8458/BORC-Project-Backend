@@ -88,6 +88,10 @@ def proxy_diagnostics(request) -> dict:
         "xff_first_is_valid_ip": first is not None,
         "xff_first_equals_x_real_ip": first is not None and first == real,
         "client_ip_source": resolve_client_ip(request)[1],
+        "xff_distinct_entries": len(set(forwarded)),
+        "vercel_forwarded_for_is_valid_ip": _valid_ip(request.headers.get("x-vercel-forwarded-for") or "") is not None,
+        "forwarding_headers": sorted(k for k in request.headers.keys()
+                                     if k.startswith(("x-vercel", "x-forwarded", "x-real", "x-envoy", "forwarded", "cf-"))),
     }
 
 
