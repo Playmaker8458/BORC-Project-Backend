@@ -57,17 +57,38 @@ def client_ip(request) -> str:
     ไม่ใช้ X-Forwarded-For: ค่าซ้ายสุดผู้ใช้ส่งมาเองได้ เปลี่ยนไปเรื่อย ๆ เพื่อหลบ limit ได้
     ถ้า header ว่างหรือไม่ใช่ IP ที่ถูกต้อง ให้ย้อนกลับไปใช้ IP ของ peer
     """
+    return resolve_client_ip(request)[0]
+
+
+def resolve_client_ip(request) -> tuple[str, str]:
+    """(IP, แหล่งที่มา) — แหล่งเป็น "proxy-x-forwarded-for" | "x-real-ip" | "peer" """
     if os.getenv("ENV") == "production":
         proxied = _ip_from_trusted_proxy(request)
         if proxied:
-            return proxied
-        candidate = (request.headers.get("x-real-ip") or "").strip()
-        if candidate and len(candidate) <= 45:
-            try:
-                return str(ipaddress.ip_address(candidate))
-            except ValueError:
-                pass
-    return get_remote_address(request)
+            return proxied, "proxy-x-forwarded-for"
+        real = _valid_ip(request.headers.get("x-real-ip") or "")
+        if real:
+            return real, "x-real-ip"
+    return get_remote_address(request), "peer"
+
+
+def proxy_diagnostics(request) -> dict:
+    """สถานะล้วนๆ สำหรับหาสาเหตุที่ rate limit ไม่แยกผู้ใช้ — ห้ามมีค่า secret หรือ IP ใดๆ ในผลลัพธ์"""
+    expected = os.getenv("API_PROXY_SECRET") or ""
+    provided = request.headers.get("x-proxy-secret") or ""
+    forwarded = [p.strip() for p in (request.headers.get("x-forwarded-for") or "").split(",") if p.strip()]
+    first = _valid_ip(forwarded[0]) if forwarded else None
+    real = _valid_ip(request.headers.get("x-real-ip") or "")
+    return {
+        "env_production": os.getenv("ENV") == "production",
+        "proxy_secret_configured": bool(expected),
+        "proxy_secret_header_present": bool(provided),
+        "proxy_secret_matches": bool(expected) and hmac.compare_digest(provided.encode(), expected.encode()),
+        "xff_entries": len(forwarded),
+        "xff_first_is_valid_ip": first is not None,
+        "xff_first_equals_x_real_ip": first is not None and first == real,
+        "client_ip_source": resolve_client_ip(request)[1],
+    }
 
 
 limiter = Limiter(key_func=client_ip) if Limiter is not None else None

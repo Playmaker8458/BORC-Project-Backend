@@ -11,7 +11,7 @@ from users.Database.ConnectDB import Connect_MongoDB
 from common.cookies import cookie_security_flags
 from common.jwt_utils import encode_token, decode_token, JWTError
 from common.user_cache import cache_get, cache_put, invalidate_user_cache  # noqa: F401  (re-export)
-from common.rate_limit import limit
+from common.rate_limit import limit, proxy_diagnostics
 from .line_oauth import (  # noqa: F401  (re-export: LINE_LOGIN_* kept for any external reference)
     LINE_LOGIN_CHANNEL_ID,
     LINE_LOGIN_CHANNEL_SECRET,
@@ -529,6 +529,13 @@ async def Logout(request: Request, response: Response):
 # ============================================================
 # NAVBAR USER
 # ============================================================
+
+@router.get("/ProxyCheck")
+def proxy_check(request: Request, response: Response):
+    """วินิจฉัยการส่งต่อ IP ผ่าน proxy ของ Vercel — ตอบเฉพาะสถานะ ไม่เปิดเผย secret หรือ IP"""
+    response.headers["Cache-Control"] = "no-store"
+    return proxy_diagnostics(request)
+
 
 @router.post("/ChatTicket")
 def issue_chat_ticket(response: Response, payload: dict = Depends(verify_user_token)):
