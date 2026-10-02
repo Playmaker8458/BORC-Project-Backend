@@ -4,6 +4,7 @@ import re
 logger = logging.getLogger(__name__)
 from fastapi import APIRouter, HTTPException, Query
 from Admin.Database.ConnectDB import Connect_MongoDB
+from common.account_cleanup import purge_account_data
 from common.user_cache import invalidate_user_cache
 from common.attachments import delete_attachments
 from common.notify import CHATBOT_INTERNAL_HEADERS, CHATBOT_URL, notify_chatbot
@@ -156,6 +157,8 @@ def Delete_AccountUser(client, user_id: str):
         delete_attachments(db, file_ids)
         _release_slots(db, active_bookings)
         deleted_queue   = col_queue.delete_many({"UserId": booking_user_id})
+        # แชท/ตำแหน่งที่อ่าน/ประวัติของบัญชีนี้ — ทำก่อนลบโปรไฟล์ เพื่อให้กดลบซ้ำได้ถ้าล้มกลางคัน
+        cleanup = purge_account_data(db, booking_user_id, "Student")
         deleted_profile = col_profile.delete_one({"_id": object_id})
         invalidate_user_cache(booking_user_id)
 
@@ -167,6 +170,7 @@ def Delete_AccountUser(client, user_id: str):
             "deleted_bookings": deleted_booking.deleted_count,
             "deleted_queue"   : deleted_queue.deleted_count,
             "deleted_profile" : deleted_profile.deleted_count,
+            "cleanup"         : cleanup,
         }
 
     # ========== Advisor ==========
@@ -187,6 +191,7 @@ def Delete_AccountUser(client, user_id: str):
         delete_attachments(db, file_ids)
         deleted_timeslot = col_timeslot.delete_many({"advisorId": booking_user_id})
         db["ConsultationAvailability"].delete_many({"advisorId": booking_user_id})
+        cleanup          = purge_account_data(db, booking_user_id, "Advisor")
         deleted_profile  = col_profile.delete_one({"_id": object_id})
         invalidate_user_cache(booking_user_id)
 
@@ -199,6 +204,7 @@ def Delete_AccountUser(client, user_id: str):
             "deleted_bookings" : deleted_booking.deleted_count,
             "deleted_timeslots": deleted_timeslot.deleted_count,
             "deleted_profile"  : deleted_profile.deleted_count,
+            "cleanup"          : cleanup,
         }
 
     else:

@@ -212,17 +212,19 @@ def cancel_booking(request: Request, body: CancelBookingRequest, background_task
         advisor_id = booking.get("AdvisorId", "")
         logger.info(f" AdvisorId: {advisor_id}")
         
-        # แจ้งเตือนยกเลิกการจองของนักศึกษาส่งให้กับ อาจารย์ (background — ไม่บล็อก event loop)
-        notify_chatbot(
-            url=f"{chatbot_uri}/NotifyCancelled/CancelBookingAdvisor", 
-            payload={
-                "AdvisorId": advisor_id, 
+        # แจ้งเตือนยกเลิกการจองของนักศึกษาส่งให้กับ อาจารย์ (background — ไม่บล็อก event loop และ chatbot ช้า/ล้ม
+        # ก็ไม่ทำให้ผู้ใช้เห็น error ทั้งที่คิวถูกยกเลิกไปแล้ว)
+        background_tasks.add_task(
+            notify_chatbot,
+            f"{chatbot_uri}/NotifyCancelled/CancelBookingAdvisor",
+            {
+                "AdvisorId": advisor_id,
                 "StudentName": booking.get("StudentName", ""),
-                "Date": date, 
-                "Time": time_str, 
-                "CancelReason": body.cancelReason.strip()
-            }, 
-            headers=CHATBOT_INTERNAL_HEADERS
+                "Date": date,
+                "Time": time_str,
+                "CancelReason": body.cancelReason.strip(),
+            },
+            CHATBOT_INTERNAL_HEADERS,
         )
 
         return {"message": "ยกเลิกการจองสำเร็จ"}

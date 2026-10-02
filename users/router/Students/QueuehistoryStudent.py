@@ -5,6 +5,7 @@ from fastapi import APIRouter, HTTPException, Request
 from ...Database.ConnectDB import Connect_MongoDB
 from users.auth.authUser import get_current_student
 from common.parallel import run_parallel
+from common.timefmt import to_thai_iso
 from datetime import datetime
 
 router = APIRouter()
@@ -102,6 +103,11 @@ def get_all_queue_history(request: Request):
             return value.replace(tzinfo=None)
 
         history.sort(key=_sort_key, reverse=True)
+
+        # ส่งออกเป็นเวลาไทย +07:00 (หลังเรียงลำดับเสร็จ — ต้องเรียงด้วย datetime จริง)
+        for item in history:
+            item["createdAt"] = to_thai_iso(item.get("createdAt"))
+            item["updatedAt"] = to_thai_iso(item.get("updatedAt"))
 
         return {"data": history}
 

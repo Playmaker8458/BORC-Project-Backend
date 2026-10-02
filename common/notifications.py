@@ -8,6 +8,7 @@
 """
 
 from datetime import datetime, timezone
+from common.timefmt import to_thai_iso
 
 # ต้องตรงกับสถานะที่ log_queue_management_history / save_auto_queue_history เขียนไว้ (ดู
 # users/router/Advisor/ManageQueueAdvisor.py, users/router/Students/Reschedule_Students.py,
@@ -49,7 +50,7 @@ def get_notifications(db, user_id: str) -> dict:
             "title": doc.get("UserName", ""),
             "message": message,
             "status": doc.get("status", ""),
-            "createdAt": created_at,
+            "createdAt": to_thai_iso(created_at),  # ส่งเป็นเวลาไทย +07:00 (is_read ข้างบนเทียบด้วย datetime จริงแล้ว)
             "read": is_read,
         })
 

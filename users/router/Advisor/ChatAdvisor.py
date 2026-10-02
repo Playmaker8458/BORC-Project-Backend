@@ -15,8 +15,9 @@ from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketDisco
 from fastapi.exceptions import WebSocketException
 from starlette import status as ws_status
 
-from users.auth.authUser import ensure_user_role, verify_user_token, get_user_id
+from users.auth.authUser import ensure_user_role, verify_user_token, verify_ws_ticket, get_user_id
 from common.url_safety import UnsafeUrl, validate_https_url
+from common.timefmt import to_thai_iso
 from common.booking_status import CHAT_STATUSES
 from common.chat_limits import ChatInvalid, check_rest_text, chat_rate_ok, parse_ws_text, retry_after_seconds, WS_POLICY_VIOLATION
 
@@ -114,7 +115,13 @@ async def room_broadcast(key: tuple[str, str], message: dict):
 
 # token
 async def get_current_user_ws(websocket: WebSocket):
+    """ยืนยันตัวตนของ WebSocket: ตั๋ว ?ticket= (จาก POST /authUser/ChatTicket) หรือ cookie session (ทางสำรอง)
+
+    ถ้ามี ticket แต่ไม่ถูกต้อง → ปฏิเสธเลย ไม่ย้อนไปใช้ cookie (ไม่ให้ตั๋วเสียถูกมองข้ามเงียบๆ)"""
     try:
+        ticket = websocket.query_params.get("ticket")
+        if ticket is not None:
+            return verify_ws_ticket(ticket)
         return verify_user_token(websocket)
     except HTTPException:
         raise WebSocketException(code=ws_status.WS_1008_POLICY_VIOLATION)
@@ -158,7 +165,7 @@ async def get_chat_history(student_id: str, request: Request):
             "sender": m.get("sender", "teacher"),
             "type": m.get("type", "text"),
             "text": m.get("text", ""),
-            "timestamp": m["timestamp"].replace(tzinfo=timezone.utc).isoformat().replace("+00:00", "Z") if m.get("timestamp") else "",
+            "timestamp": to_thai_iso(m["timestamp"]) if m.get("timestamp") else "",
         } for m in messages]
     except HTTPException:
         raise
@@ -229,7 +236,7 @@ async def send_chat_message(body: ChatMessageBody, request: Request):
         })
         await room_broadcast(room_key(body.student_id, advisor_id), {
             "sender": "teacher", "type": "text", "text": text,
-            "timestamp": now.isoformat().replace("+00:00", "Z"),
+            "timestamp": to_thai_iso(now),
         })
         return {"message": "ส่งข้อความสำเร็จ"}
     except HTTPException:
@@ -259,7 +266,7 @@ async def send_chat_appointment(body: ChatAppointmentBody, request: Request):
         })
         await room_broadcast(room_key(body.student_id, advisor_id), {
             "sender": "teacher", "type": "link", "text": url,
-            "timestamp": now.isoformat().replace("+00:00", "Z"),
+            "timestamp": to_thai_iso(now),
         })
 
         async with httpx.AsyncClient() as http:
@@ -324,7 +331,7 @@ async def advisor_chat_ws(
             })
             await room_broadcast(key, {
                 "sender": "teacher", "type": "text", "text": text,
-                "timestamp": now.isoformat().replace("+00:00", "Z"),
+                "timestamp": to_thai_iso(now),
             })
     except WebSocketDisconnect:
         room_disconnect(key, websocket)

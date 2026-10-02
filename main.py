@@ -23,6 +23,8 @@ from Admin.router.GetHistoryAccount import router as GetHistoryAccount_router
 from Admin.router.SettingAdmin import router as SettingAdmin_router
 from Admin.router.CountUser import router as CountUser_router
 
+from common.log_redact import RedactTicketFilter
+from common.timefmt import install_thai_json_encoder
 from users.auth.authUser import router as auth_router_user, require_advisor, require_student
 from users.router.SetupProfile import router as SetupProfile_router
 from users.router.WaitingApproval import router as WaitingApproval_router
@@ -140,6 +142,13 @@ class FilterUnwantedLog(logging.Filter):
 
 logging.getLogger("uvicorn.access").addFilter(FilterUnwantedLog())
 
+# ตั๋ว WebSocket ของแชท (?ticket=...) ห้ามค้างใน log (ดู common/log_redact.py)
+for _name in ("uvicorn.access", "uvicorn.error"):
+    logging.getLogger(_name).addFilter(RedactTicketFilter())
+
+
+# datetime ทุกตัวที่ API ส่งออกเป็นเวลาไทย +07:00 (ดู common/timefmt.py)
+install_thai_json_encoder()
 
 origins = [url for url in [Frontend, Backend, ChatBot] if url]
 

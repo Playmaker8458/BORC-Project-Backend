@@ -47,6 +47,10 @@ SESSION_MAX_AGE = timedelta(hours=24)
 # token ชั่วคราวของผู้ใช้ใหม่ที่กำลังกรอกฟอร์ม ProfileSetup (เดิม 15 นาที
 # แต่ cookie อยู่ 1 วัน ทำให้ cookie ยังอยู่แต่ JWT หมดอายุแล้ว → 401 ตอนกดบันทึก)
 REGISTRATION_MAX_AGE = timedelta(hours=24)
+# ตั๋วเชื่อมต่อ WebSocket ของแชท: อายุสั้นมาก เพราะไปอยู่ใน URL (อาจถูกบันทึกใน access log) และหน้าเว็บขอตั๋วใหม่ทุกครั้งที่ต่อ/ต่อใหม่
+# ค่า 30 วินาทีพอสำหรับช่วงจากขอตั๋วถึงเปิด socket (ปกติไม่กี่ร้อยมิลลิวินาที); ตั๋วผูกกับ purpose นี้เท่านั้น ใช้เป็น session ไม่ได้
+WS_TICKET_PURPOSE = "chat_ws"
+WS_TICKET_TTL = timedelta(seconds=30)
 JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY")
 
 if not JWT_SECRET_KEY:
@@ -167,6 +171,43 @@ def _get_user_cached(user_id: str) -> dict | None:
 # Verify User JWT
 # ============================================================
 
+def _active_user_payload(user_id: str) -> dict:
+    """ค้นผู้ใช้จากฐานข้อมูลแล้วตรวจว่ามีอยู่ บทบาทถูกต้อง และอนุมัติแล้ว; คืน payload มาตรฐานของ session
+    (ใช้ร่วมกันระหว่าง session cookie และตั๋ว WebSocket — บทบาท/สถานะอ่านจากฐานข้อมูลเสมอ ไม่เชื่อค่าใน token)"""
+
+    db_user = _get_user_cached(user_id)
+
+    if not db_user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="ไม่พบข้อมูลผู้ใช้",
+        )
+
+    role = db_user.get("Role")
+
+    if role not in ["Student", "Advisor"]:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="ไม่มีสิทธิ์เข้าถึง",
+        )
+
+    if db_user.get("Status") != ACTIVE_STATUS:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="บัญชีของคุณไม่ได้รับการอนุมัติ หรือถูกระงับ กรุณาติดต่อผู้ดูแลระบบ",
+        )
+
+    return {
+        "user_id": user_id,
+        "role": role,
+        "Status": db_user.get("Status", ""),
+        "Prefix": db_user.get("Prefix", ""),
+        "Firstname": db_user.get("Firstname", ""),
+        "Lastname": db_user.get("Lastname", ""),
+        "imageURL": db_user.get("imageURL", ""),
+    }
+
+
 def verify_user_token(request: Request):
     """
     ตรวจสอบ JWT จาก Cookie
@@ -192,43 +233,14 @@ def verify_user_token(request: Request):
 
         user_id = payload.get("user_id")
 
-        if not user_id:
+        if not user_id or payload.get("purpose"):
+            # token ที่มี purpose (เช่น ตั๋ว WebSocket) ไม่ใช่ session — ใช้เป็น cookie ของ REST ไม่ได้
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Token ไม่ถูกต้อง",
             )
 
-        db_user = _get_user_cached(user_id)
-
-        if not db_user:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="ไม่พบข้อมูลผู้ใช้",
-            )
-
-        role = db_user.get("Role")
-
-        if role not in ["Student", "Advisor"]:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="ไม่มีสิทธิ์เข้าถึง",
-            )
-
-        if db_user.get("Status") != ACTIVE_STATUS:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="บัญชีของคุณไม่ได้รับการอนุมัติ หรือถูกระงับ กรุณาติดต่อผู้ดูแลระบบ",
-            )
-
-        return {
-            "user_id": user_id,
-            "role": role,
-            "Status": db_user.get("Status", ""),
-            "Prefix": db_user.get("Prefix", ""),
-            "Firstname": db_user.get("Firstname", ""),
-            "Lastname": db_user.get("Lastname", ""),
-            "imageURL": db_user.get("imageURL", ""),
-        }
+        return _active_user_payload(user_id)
 
     except JWTError:
         # Token หมดอายุ (ครบ 24 ชม.) หรือไม่ถูกต้อง → ลบ cookie ทิ้งพร้อมตอบ 401
@@ -238,6 +250,24 @@ def verify_user_token(request: Request):
             detail="เซสชันหมดอายุ กรุณาเข้าสู่ระบบใหม่",
             headers=_clear_session_headers(request),
         )
+
+def verify_ws_ticket(ticket: str) -> dict:
+    """ตรวจตั๋ว WebSocket (ออกโดย POST /authUser/ChatTicket): ต้องไม่หมดอายุ และมี purpose ตรง
+
+    ตั๋วมีแค่ user_id — บทบาท/สถานะอ่านจากฐานข้อมูลตอนใช้ (บัญชีที่ถูกระงับ/ลบระหว่างนั้นจึงใช้ตั๋วไม่ได้)
+    ตั๋วที่ไม่ถูกต้องทุกแบบ (เสีย/หมดอายุ/session JWT ธรรมดา) ตอบ 401 เหมือนกัน ไม่บอกสาเหตุ"""
+
+    try:
+        claims = decode_token(ticket)
+    except JWTError:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="ตั๋วไม่ถูกต้องหรือหมดอายุ")
+
+    user_id = claims.get("user_id")
+    if not user_id or claims.get("purpose") != WS_TICKET_PURPOSE:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="ตั๋วไม่ถูกต้องหรือหมดอายุ")
+
+    return _active_user_payload(user_id)
+
 
 def _require_role(request: Request, role: str, detail: str) -> dict:
     payload = verify_user_token(request)
@@ -499,6 +529,19 @@ async def Logout(request: Request, response: Response):
 # ============================================================
 # NAVBAR USER
 # ============================================================
+
+@router.post("/ChatTicket")
+def issue_chat_ticket(response: Response, payload: dict = Depends(verify_user_token)):
+    """ออกตั๋วอายุสั้นสำหรับเชื่อมต่อ WebSocket ของแชท
+
+    เหตุผล: REST ผ่าน proxy ของ Vercel (cookie อยู่โดเมนเดียวกับหน้าเว็บ) แต่ WebSocket ต่อตรงไปโดเมน Railway ซึ่งเบราว์เซอร์
+    ไม่ส่ง cookie ไปให้ — หน้าเว็บจึงขอตั๋วจากที่นี่ (ผ่าน /api มี cookie) แล้วส่งตั๋วไปกับ WebSocket แทน
+    ต้องมี session ที่ใช้ได้ (อนุมัติแล้ว) ถึงจะได้ตั๋ว"""
+
+    response.headers["Cache-Control"] = "no-store"
+    ticket = encode_token({"user_id": payload["user_id"], "purpose": WS_TICKET_PURPOSE}, WS_TICKET_TTL)
+    return {"ticket": ticket, "expires_in": int(WS_TICKET_TTL.total_seconds())}
+
 
 @router.get("/NavbarUsers")
 def get_NavbarUsers(payload: dict = Depends(verify_user_token), response: Response = None):

@@ -9,6 +9,7 @@ from starlette import status as ws_status
 
 from users.auth.authUser import ensure_user_role, verify_user_token, get_user_id
 from common.booking_status import CHAT_STATUSES
+from common.timefmt import to_thai_iso
 from common.chat_limits import ChatInvalid, chat_rate_ok, parse_ws_text, WS_POLICY_VIOLATION
 from common.chat_unread import SENDER_FROM_ADVISOR, get_last_read_at, get_unread_count, mark_chat_read
 
@@ -92,7 +93,7 @@ async def get_my_chat_history(request: Request):
             "sender": m.get("sender", "teacher"),
             "type": m.get("type", "text"),
             "text": m.get("text", ""),
-            "timestamp": m["timestamp"].replace(tzinfo=timezone.utc).isoformat().replace("+00:00", "Z") if m.get("timestamp") else "",
+            "timestamp": to_thai_iso(m["timestamp"]) if m.get("timestamp") else "",
         } for m in messages]
     except HTTPException:
         raise
@@ -191,7 +192,7 @@ async def student_chat_ws(
             })
             await room_broadcast(key, {
                 "sender": "student", "type": "text", "text": text,
-                "timestamp": now.isoformat().replace("+00:00", "Z"),
+                "timestamp": to_thai_iso(now),
             })
     except WebSocketDisconnect:
         room_disconnect(key, websocket)

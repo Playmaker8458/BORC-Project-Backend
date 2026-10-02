@@ -68,3 +68,17 @@ def _reset_chat_limiter():
     chat_limiter.reset()
     yield
     chat_limiter.reset()
+
+
+# ตัวป้องกันกลาง (common/timefmt.py: install_thai_json_encoder) แก้ตาราง encoder ของ FastAPI ทั้งโปรเจกต์
+# ให้ทุกเทสต์เริ่มจากค่าตั้งต้นของ FastAPI เสมอ — ไม่งั้นเทสต์ที่ติดตั้งไว้จะ "บังกัน" ให้เทสต์อื่นผ่านทั้งที่โค้ดของ endpoint นั้นไม่ได้แปลงเวลาเอง
+from datetime import datetime as _datetime  # noqa: E402
+
+from fastapi import encoders as _fastapi_encoders  # noqa: E402
+
+_DEFAULT_DATETIME_ENCODER = _fastapi_encoders.ENCODERS_BY_TYPE[_datetime]
+
+
+@pytest.fixture(autouse=True)
+def _fastapi_default_datetime_encoder(monkeypatch):
+    monkeypatch.setitem(_fastapi_encoders.ENCODERS_BY_TYPE, _datetime, _DEFAULT_DATETIME_ENCODER)
