@@ -42,8 +42,19 @@ def _ip_from_trusted_proxy(request) -> str | None:
     provided = request.headers.get("x-proxy-secret") or ""
     if not expected or not hmac.compare_digest(provided.encode(), expected.encode()):
         return None
-    forwarded = request.headers.get("x-forwarded-for") or ""
-    return _valid_ip(forwarded.split(",")[0])
+    return _proxied_ip(request)[0]
+
+
+def _proxied_ip(request) -> tuple[str | None, str]:
+    """(IP, แหล่ง) จาก header ที่ Vercel ใส่ — เรียกหลังตรวจ secret แล้วเท่านั้น
+
+    X-Vercel-Forwarded-For คือ IP ผู้ใช้จริงที่ Vercel เห็น (Vercel เขียนทับเอง ผู้ใช้ปลอมไม่ได้)
+    ส่วน X-Forwarded-For ตัวแรกที่ถึง Railway เป็น IP ฝั่ง Vercel ซึ่งเปลี่ยนไปเรื่อยๆ จึงเป็นแค่ตัวสำรอง
+    """
+    real = _valid_ip((request.headers.get("x-vercel-forwarded-for") or "").split(",")[0])
+    if real:
+        return real, "x-vercel-forwarded-for"
+    return _valid_ip((request.headers.get("x-forwarded-for") or "").split(",")[0]), "proxy-x-forwarded-for"
 
 
 def client_ip(request) -> str:
@@ -65,7 +76,7 @@ def resolve_client_ip(request) -> tuple[str, str]:
     if os.getenv("ENV") == "production":
         proxied = _ip_from_trusted_proxy(request)
         if proxied:
-            return proxied, "proxy-x-forwarded-for"
+            return proxied, _proxied_ip(request)[1]
         real = _valid_ip(request.headers.get("x-real-ip") or "")
         if real:
             return real, "x-real-ip"
