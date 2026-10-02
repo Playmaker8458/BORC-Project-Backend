@@ -83,29 +83,6 @@ def resolve_client_ip(request) -> tuple[str, str]:
     return get_remote_address(request), "peer"
 
 
-def proxy_diagnostics(request) -> dict:
-    """สถานะล้วนๆ สำหรับหาสาเหตุที่ rate limit ไม่แยกผู้ใช้ — ห้ามมีค่า secret หรือ IP ใดๆ ในผลลัพธ์"""
-    expected = os.getenv("API_PROXY_SECRET") or ""
-    provided = request.headers.get("x-proxy-secret") or ""
-    forwarded = [p.strip() for p in (request.headers.get("x-forwarded-for") or "").split(",") if p.strip()]
-    first = _valid_ip(forwarded[0]) if forwarded else None
-    real = _valid_ip(request.headers.get("x-real-ip") or "")
-    return {
-        "env_production": os.getenv("ENV") == "production",
-        "proxy_secret_configured": bool(expected),
-        "proxy_secret_header_present": bool(provided),
-        "proxy_secret_matches": bool(expected) and hmac.compare_digest(provided.encode(), expected.encode()),
-        "xff_entries": len(forwarded),
-        "xff_first_is_valid_ip": first is not None,
-        "xff_first_equals_x_real_ip": first is not None and first == real,
-        "client_ip_source": resolve_client_ip(request)[1],
-        "xff_distinct_entries": len(set(forwarded)),
-        "vercel_forwarded_for_is_valid_ip": _valid_ip(request.headers.get("x-vercel-forwarded-for") or "") is not None,
-        "forwarding_headers": sorted(k for k in request.headers.keys()
-                                     if k.startswith(("x-vercel", "x-forwarded", "x-real", "x-envoy", "forwarded", "cf-"))),
-    }
-
-
 limiter = Limiter(key_func=client_ip) if Limiter is not None else None
 
 
