@@ -16,9 +16,7 @@ from common.slot_service import (
 )
 from common.booking_status import ACTIVE_STATUSES
 from common.notify import CHATBOT_INTERNAL_HEADERS, CHATBOT_URL, notify_chatbot
-from common.parallel import run_parallel
-from common.queue_history import log_queue_management_history
-from common.reschedule_history import insert_reschedule_history
+from common.reschedule_flow import record_reschedule_history, resolve_same_day_mode
 
 
 router = APIRouter()
@@ -76,10 +74,8 @@ def get_booking_info(user_id: str, request: Request):
                 detail="อาจารย์ใช้สิทธิ์เลื่อนคิวนี้ไปแล้ว 1 ครั้ง"
             )
 
-        time_str   = booking.get("Time", "")
-        time_parts = [t.strip() for t in time_str.split("-")] if "-" in time_str else []
-        start_time = time_parts[0] if len(time_parts) == 2 else ""
-        end_time   = time_parts[1] if len(time_parts) == 2 else ""
+        time_str = booking.get("Time", "")
+        start_time, end_time = split_time_range(time_str)
 
         if start_time and is_within_advisor_cutoff_window(booking.get("Date", ""), start_time):
             raise HTTPException(
@@ -188,14 +184,9 @@ def reschedule_booking(request: Request, body: RescheduleBody, background_tasks:
         db = Connect_MongoDB()["BORC"]
         booking, old_start, old_end = _load_reschedulable_booking(db, advisor_id, body.user_id)
 
-        if body.mode not in ("date_time", "time_only"):
-            raise HTTPException(status_code=400, detail="รูปแบบการเลื่อนคิวไม่ถูกต้อง")
-        same_day = body.mode == "time_only"
-        if same_day:
-            if body.new_date != booking.get("Date", ""):
-                raise HTTPException(status_code=400, detail="การเลื่อนเฉพาะเวลาต้องเป็นวันเดียวกับนัดเดิม")
-            if body.new_start == old_start:
-                raise HTTPException(status_code=400, detail="กรุณาเลือกช่วงเวลาที่ต่างจากเวลาเดิม")
+        same_day = resolve_same_day_mode(
+            body.mode, body.new_date, body.new_start, booking.get("Date", ""), old_start
+        )
 
         ensure_slot_open_for_reschedule(
             db, advisor_id, body.new_date, body.new_start, body.new_end, same_day=same_day
@@ -226,38 +217,24 @@ def reschedule_booking(request: Request, body: RescheduleBody, background_tasks:
             CHATBOT_INTERNAL_HEADERS,
         )
 
-        # คิวถูกเลื่อนไปแล้วใน DB (move_booking_to_slot สำเร็จ) — งานต่อจากนี้ (เขียนประวัติ 2 รายการ)
-        # ห้ามทำให้ request ล้ม ไม่งั้นจะตอบ 500 ทั้งที่เลื่อนคิวสำเร็จแล้ว (เหมือนที่แก้ไปแล้วใน
-        # ManageQueueStudent.py ตอนยกเลิกคิว)
-        try:
-            run_parallel(
-                lambda: insert_reschedule_history(
-                    db,
-                    rescheduled_by_id=advisor_id,
-                    rescheduled_by_role="Advisor",
-                    booking=booking,
-                    new_date=body.new_date,
-                    new_start=body.new_start,
-                    new_end=body.new_end,
-                    new_label=body.new_label,
-                    reason=body.reason,
-                    old_start=old_start,
-                    old_end=old_end,
-                    now=now,
-                ),
-                lambda: log_queue_management_history(
-                    db,
-                    advisor_id=advisor_id,
-                    advisor_name=booking.get("Advisor_Name", ""),
-                    student_id=student_id,
-                    student_name=student_name,
-                    status="Rescheduled",
-                    reason=body.reason,
-                    now=now,
-                ),
-            )
-        except Exception:
-            logger.exception("[RescheduleBooking] เลื่อนคิว %s แล้ว แต่เขียนประวัติไม่สำเร็จ", booking["_id"])
+        record_reschedule_history(
+            db,
+            booking=booking,
+            actor_id=advisor_id,
+            actor_role="Advisor",
+            advisor_id=advisor_id,
+            advisor_name=booking.get("Advisor_Name", ""),
+            student_id=student_id,
+            student_name=student_name,
+            new_date=body.new_date,
+            new_start=body.new_start,
+            new_end=body.new_end,
+            new_label=body.new_label,
+            reason=body.reason,
+            old_start=old_start,
+            old_end=old_end,
+            now=now,
+        )
 
         return {"message": "เลื่อนคิวสำเร็จ"}
 

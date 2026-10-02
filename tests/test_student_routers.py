@@ -19,6 +19,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from common import reschedule_flow
 from common.jwt_utils import encode_token
 
 
@@ -300,7 +301,7 @@ def test_reschedule_booking_succeeds_even_if_history_write_fails(rs_client, mong
         },
     })
     monkeypatch.setattr(
-        rs, "log_queue_management_history",
+        reschedule_flow, "log_queue_management_history",
         lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("mongo write failed")),
     )
 

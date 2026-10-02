@@ -74,7 +74,7 @@ def _seed(mongo, booking_status="Approved"):
     db = mongo["BORC"]
     now = datetime.now(timezone.utc)
     for uid, role in [("student-1", "Student"), ("student-2", "Student"), ("advisor-1", "Advisor")]:
-        db["UserProfile"].insert_one({"userId": uid, "Role": role, "Status": "Approved", "Prefix": "นาย",
+        db["UserProfile"].insert_one({"userId": uid, "Role": role, "Status": "Approved", "Department": "สาขาทดสอบ", "Prefix": "นาย",
                                       "Firstname": uid, "Lastname": "ทดสอบ", "imageURL": ""})
     db["BookingOnline"].insert_one({
         "UserId": "student-1", "StudentName": "นายstudent-1 ทดสอบ", "AdvisorId": "advisor-1",
@@ -211,10 +211,10 @@ BUDGET = {
     "student ShowData": 2,
     "student BookingStats": 3,
     "student History": 5,
-    "student AvailableAdvisors": 3,
-    "student AvailableSlots": 2,
+    "student AvailableAdvisors": 5,   # +2: กฎกรองตามสาขา (หาสาขาผู้เรียก + กรองอาจารย์ตามสาขา)
+    "student AvailableSlots": 4,      # +2: กฎกรองตามสาขา (assert_same_department)
     "student BookingStatus": 2,
-    "student BookingOnline (POST)": 7,
+    "student BookingOnline (POST)": 9,  # +2: กฎกรองตามสาขา
     "student MyBookingDetail": 2,
     "student CheckRescheduleEligibility": 2,
     "student CancelBooking": 8,

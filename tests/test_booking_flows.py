@@ -33,10 +33,12 @@ def _cookies(user_id):
 
 
 def _seed_user(mongo_client, user_id, role):
-    mongo_client["BORC"]["UserProfile"].insert_one({
+    # upsert: _seed_slots อาจสร้างโปรไฟล์อาจารย์ของ slot ไว้ก่อนแล้ว ไม่ให้เกิดเอกสารซ้ำ
+    mongo_client["BORC"]["UserProfile"].update_one({"userId": user_id}, {"$set": {
         "userId": user_id, "Role": role, "Status": "Approved",
         "Prefix": "นาย", "Firstname": "ทดสอบ", "Lastname": "ระบบ", "imageURL": "",
-    })
+        "Department": "สาขาทดสอบ",
+    }}, upsert=True)
 
 
 def _slot(start="09:00", end="10:00", **kw):
@@ -50,6 +52,13 @@ def _seed_slots(mongo_client, dates, advisor_id="advisor-1"):
     mongo_client["BORC"]["ManageTimeSlots"].insert_one({
         "advisorId": advisor_id, "advisor_name": "อ.ทดสอบ", "dates": dates,
     })
+    # กรองตามสาขา: อาจารย์เจ้าของ slot ต้องมี UserProfile (Role=Advisor) สาขาเดียวกับผู้ใช้ทดสอบ
+    mongo_client["BORC"]["UserProfile"].update_one(
+        {"userId": advisor_id},
+        {"$setOnInsert": {"Role": "Advisor", "Status": "Approved", "Department": "สาขาทดสอบ",
+                          "Prefix": "อ.", "Firstname": "ทดสอบ", "Lastname": "อาจารย์", "imageURL": ""}},
+        upsert=True,
+    )
 
 
 def _seed_two_days(mongo, new_slot=None):

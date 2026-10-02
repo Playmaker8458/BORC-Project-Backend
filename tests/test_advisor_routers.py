@@ -16,6 +16,7 @@ import requests
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from common import reschedule_flow
 from common.jwt_utils import encode_token
 
 
@@ -32,6 +33,7 @@ def _seed_user(mongo_client, user_id, role="Advisor", status="Approved", **extra
         "Firstname": "ทดสอบ",
         "Lastname": "อาจารย์",
         "imageURL": "",
+        "Department": "สาขาทดสอบ",  # กฎกรองตามสาขา: ทุกผู้ใช้ทดสอบอยู่สาขาเดียวกันโดยค่าเริ่มต้น
     }
     doc.update(extra)
     mongo_client["BORC"]["UserProfile"].insert_one(doc)
@@ -535,7 +537,7 @@ def test_reschedule_booking_succeeds_even_if_history_write_fails(ra_client, mong
 
     monkeypatch.setattr(requests, "post", lambda *a, **kw: _FakeResp())
     monkeypatch.setattr(
-        ra, "log_queue_management_history",
+        reschedule_flow, "log_queue_management_history",
         lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("mongo write failed")),
     )
 

@@ -166,7 +166,7 @@ def booking(mongo_client, monkeypatch):
     app = FastAPI()
     app.include_router(bo.router)
     mongo_client["BORC"]["UserProfile"].insert_one({
-        "userId": "student-1", "Role": "Student", "Status": "Approved", "Prefix": "", "Firstname": "s",
+        "userId": "student-1", "Role": "Student", "Status": "Approved", "Department": "สาขาทดสอบ", "Prefix": "", "Firstname": "s",
         "Lastname": "1", "imageURL": ""})
     return TestClient(app), mongo_client
 
@@ -183,6 +183,12 @@ def _slot(start="09:00", end="10:00", **kw):
 
 def _advisor(mongo, advisor_id, name, dates):
     mongo["BORC"]["ManageTimeSlots"].insert_one({"advisorId": advisor_id, "advisor_name": name, "dates": dates})
+    # กรองตามสาขา: อาจารย์ต้องมี UserProfile (Role=Advisor) สาขาเดียวกับนักศึกษา จึงจะถูกแสดง/จองได้
+    mongo["BORC"]["UserProfile"].update_one(
+        {"userId": advisor_id},
+        {"$setOnInsert": {"Role": "Advisor", "Status": "Approved", "Department": "สาขาทดสอบ", "Firstname": name}},
+        upsert=True,
+    )
 
 
 def _listed(client):
@@ -258,8 +264,10 @@ def _slots(client, advisor_id="a1"):
 
 
 def test_available_slots_unknown_advisor_returns_empty(booking):
+    # กฎกรองตามสาขา: ผู้ใช้ที่ไม่มีอยู่/ไม่ใช่อาจารย์สาขาเดียวกันเป็น 403 (ก่อนหน้านี้ตอบ 200 ว่าง)
     client, _ = booking
-    assert _slots(client, "nobody") == {"dates": {}}
+    resp = client.get("/AvailableSlots/nobody", cookies=_cookies())
+    assert resp.status_code == 403
 
 
 def test_available_slots_exact_output_for_open_and_taken_slots(booking):
