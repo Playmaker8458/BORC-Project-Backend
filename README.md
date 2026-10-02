@@ -22,7 +22,6 @@ Backend API ของระบบ BORC (Booking Online Research Consultation) �
 backend/
 ├── main.py                     # FastAPI app, CORS, router registration, background worker
 ├── requirements.txt
-├── .env.example
 ├── Dockerfile
 ├── common/                     # โค้ดที่ใช้ร่วมกัน (ไม่ผูกกับ HTTP router ตัวใดตัวหนึ่ง)
 │   ├── booking_status.py        #   กลุ่มสถานะคิว (ACTIVE/CANCELLABLE/CHAT ...) — แหล่งเดียว + แผนภาพวงจรชีวิตคิว
@@ -70,11 +69,7 @@ backend/
    pip install -r requirements.txt
    ```
 
-2. คัดลอก `.env.example` เป็น `.env` แล้วกรอกค่าจริง (ดูรายละเอียดแต่ละตัวแปรใน `.env.example`)
-
-   ```bash
-   cp .env.example .env
-   ```
+2. สร้างไฟล์ `.env` ในโฟลเดอร์ `backend/` แล้วกรอกค่าจริงของทุกตัวแปรที่ระบบใช้ (เช่น `JWT_SECRET_KEY`, `EMAIL_LOGIN`, `PASSWORD_LOGIN`)
 
 3. (ครั้งแรกเท่านั้น) seed บัญชีแอดมินจาก `EMAIL_LOGIN` / `PASSWORD_LOGIN` ใน `.env`
 

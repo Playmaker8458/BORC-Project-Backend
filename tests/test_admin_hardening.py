@@ -69,6 +69,26 @@ def test_client_ip_supports_ipv6(monkeypatch):
     assert rate_limit.client_ip(_request({"X-Real-IP": "2001:db8::1"})) == "2001:db8::1"
 
 
+def test_client_ip_trusts_forwarded_for_only_with_valid_proxy_secret(monkeypatch):
+    """ผ่าน Vercel proxy: secret ตรง -> ใช้ IP ซ้ายสุดของ XFF; ไม่ตรง/ไม่ตั้ง secret -> ไม่เชื่อ XFF"""
+    monkeypatch.setenv("ENV", "production")
+    monkeypatch.setenv("API_PROXY_SECRET", "s3cret")
+    headers = {"X-Proxy-Secret": "s3cret", "X-Forwarded-For": "203.0.113.7, 76.76.21.1", "X-Real-IP": "76.76.21.1"}
+    assert rate_limit.client_ip(_request(headers)) == "203.0.113.7"
+    headers["X-Proxy-Secret"] = "wrong"
+    assert rate_limit.client_ip(_request(headers)) == "76.76.21.1"
+    monkeypatch.delenv("API_PROXY_SECRET")
+    headers["X-Proxy-Secret"] = ""
+    assert rate_limit.client_ip(_request(headers)) == "76.76.21.1"
+
+
+def test_client_ip_proxy_secret_ignored_outside_production(monkeypatch):
+    monkeypatch.setenv("ENV", "development")
+    monkeypatch.setenv("API_PROXY_SECRET", "s3cret")
+    req = _request({"X-Proxy-Secret": "s3cret", "X-Forwarded-For": "203.0.113.7"}, peer="127.0.0.1")
+    assert rate_limit.client_ip(req) == "127.0.0.1"
+
+
 # ── app สำหรับ admin login / change password ─────────────────────────────────
 
 @pytest.fixture

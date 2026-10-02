@@ -9,6 +9,7 @@ users/auth/authUser.py (endpoint login / OAuth code-exchange เท่านั�
 `limiter` จะเป็น None และ endpoint จะไม่ถูกจำกัด rate แทนที่จะ error
 """
 
+import hmac
 import ipaddress
 import os
 
@@ -17,6 +18,32 @@ try:
     from slowapi.util import get_remote_address
 except ImportError:  # pragma: no cover - slowapi ไม่ได้ติดตั้ง
     Limiter = None
+
+
+def _valid_ip(value: str) -> str | None:
+    value = (value or "").strip()
+    if not value or len(value) > 45:
+        return None
+    try:
+        return str(ipaddress.ip_address(value))
+    except ValueError:
+        return None
+
+
+def _ip_from_trusted_proxy(request) -> str | None:
+    """IP ผู้ใช้จริงเมื่อคำขอมาผ่าน proxy ของ Vercel (/api/* rewrite ใน vercel.json)
+
+    ผ่าน proxy นั้น X-Real-IP ของ Railway จะเป็น IP ของ Vercel ทุกคำขอ ทำให้ทุกคนใช้โควตาเดียวกัน
+    Vercel จึงแนบ header ลับ X-Proxy-Secret (ค่า API_PROXY_SECRET เดียวกับที่ตั้งไว้ใน env ของ backend)
+    ถ้าตรงกัน แปลว่าคำขอผ่าน Vercel จริง และ Vercel เขียนทับ X-Forwarded-For ด้วย IP ผู้ใช้จริงเอง
+    (ผู้ใช้ปลอมไม่ได้) จึงใช้ค่าซ้ายสุดของ header นั้น — ถ้าไม่ได้ตั้ง secret หรือไม่ตรง จะไม่เชื่อ header ใดเลย
+    """
+    expected = os.getenv("API_PROXY_SECRET") or ""
+    provided = request.headers.get("x-proxy-secret") or ""
+    if not expected or not hmac.compare_digest(provided.encode(), expected.encode()):
+        return None
+    forwarded = request.headers.get("x-forwarded-for") or ""
+    return _valid_ip(forwarded.split(",")[0])
 
 
 def client_ip(request) -> str:
@@ -31,6 +58,9 @@ def client_ip(request) -> str:
     ถ้า header ว่างหรือไม่ใช่ IP ที่ถูกต้อง ให้ย้อนกลับไปใช้ IP ของ peer
     """
     if os.getenv("ENV") == "production":
+        proxied = _ip_from_trusted_proxy(request)
+        if proxied:
+            return proxied
         candidate = (request.headers.get("x-real-ip") or "").strip()
         if candidate and len(candidate) <= 45:
             try:
