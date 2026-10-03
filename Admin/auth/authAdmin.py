@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 # ตั้งค่าการสร้าง JWT (การเข้ารหัส/ถอดรหัสจริงอยู่ใน common/jwt_utils.py)
-ACCESS_TOKEN_EXPIRE_MINUTES =  60 * 24  # 24 ชั่วโมง
+SESSION_MAX_AGE = timedelta(hours=24)  # 24 ชั่วโมง
 # เข้าถึงตัวแปรในไฟล์ .env เพื่อดึงมาใช้งานในไฟล์ auth.py แบบ local
 load_dotenv()
 
@@ -46,7 +46,7 @@ def create_access_token(data: dict):
     การเปลี่ยนรหัสผ่านล่าสุดหรือไม่ (ถ้าใช่ = ถูกเพิกถอน)
     """
     return encode_token({**data, "iat": datetime.now(timezone.utc).timestamp()},
-                        timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES))
+                        SESSION_MAX_AGE)
 
 
 # hash ปลอมไว้เทียบรหัสผ่านตอนไม่พบอีเมล: ให้เวลาตอบเท่ากับกรณีมีอีเมล (กันเดาอีเมลจากเวลาตอบ)
@@ -68,7 +68,7 @@ def set_admin_cookie(request: Request, response: Response, token: str) -> None:
         key=ADMIN_COOKIE_NAME,
         value=token,
         httponly=True,
-        max_age=ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+        max_age=int(SESSION_MAX_AGE.total_seconds()),
         path="/",
         **cookie_security_flags(request),
     )
