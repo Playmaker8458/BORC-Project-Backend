@@ -3,7 +3,6 @@ from fastapi import APIRouter, HTTPException, Request, UploadFile, File, Form, D
 from ...Database.ConnectDB import Connect_MongoDB
 from users.auth.authUser import verify_user_token, get_user_id
 from datetime import datetime, timezone
-import requests as req
 from dotenv import load_dotenv
 from pymongo.errors import DuplicateKeyError
 from common.booking_status import ACTIVE_STATUSES
@@ -18,7 +17,8 @@ from common.slot_service import (
     validate_date_or_400,
 )
 from common.attachments import Attachment, content_matches_type, delete_attachments, store_attachment
-from common.notify import CHATBOT_INTERNAL_HEADERS, CHATBOT_URL
+from common.notify import CHATBOT_INTERNAL_HEADERS, CHATBOT_URL, notify_chatbot
+from common.queue_history import log_queue_management_history
 
 logger = logging.getLogger(__name__)
 
@@ -175,15 +175,6 @@ def get_available_slots(advisor_id: str, request: Request):
     except Exception as e:
         logger.exception("Unhandled error")
         raise HTTPException(status_code=500, detail="Internal server error")
-
-
-# ─── Background notify helper ─────────────────────────────────────────────────
-def _notify_advisor_background(chatbot_url: str, payload: dict):
-    """ส่งแจ้งเตือนอาจารย์ใน background thread ไม่บล็อก response"""
-    try:
-        req.post(chatbot_url, json=payload, timeout=8, headers=CHATBOT_INTERNAL_HEADERS)
-    except Exception as e:
-        logger.warning(f"[WARN] แจ้งเตือน Advisor ล้มเหลว: {e}")
 
 
 # ─── POST /BookingOnline helpers ──────────────────────────────────────────────
@@ -392,18 +383,39 @@ def create_booking(
             delete_attachments(db, [file_id])
             raise
 
-        # แจ้งเตือนอาจารย์มีนักศึกษามาจอง (ทำงานใน background ไม่บล็อก response)
+        # แจ้งเตือนในแอป (กระดิ่ง) ให้ทั้งอาจารย์และนักศึกษา — คิวถูกบันทึกแล้ว จึงห้ามทำให้ request ล้ม
+        try:
+            log_queue_management_history(
+                db,
+                advisor_id=data.advisor_id,
+                advisor_name=advisor_name,
+                student_id=user_id,
+                student_name=student_name,
+                status="Pending",
+                reason=None,
+                now=now,
+            )
+        except Exception:
+            logger.exception("[BookingOnline] จองคิวแล้ว แต่บันทึกแจ้งเตือนในแอปไม่สำเร็จ")
+
+        # แจ้งเตือน LINE ทั้งอาจารย์ (มีนักศึกษาขอจอง) และนักศึกษาผู้จอง (ยืนยันว่าส่งคำขอแล้ว) — ทำงานใน background ไม่บล็อก response
+        # ผ่าน notify_chatbot เพื่อให้ log เมื่อ ChatBot ปฏิเสธ (เช่น 401 secret ไม่ตรง) ไม่ล้มเงียบ; รอ 8 วินาทีเท่าเดิม
+        # (ChatBot ส่ง LINE สองคนต่อเนื่องกัน)
         background_tasks.add_task(
-            _notify_advisor_background,
+            notify_chatbot,
             f"{chatbot_uri}/NotifyQueueAdivsor/BookingStudent",
             {
                 "AdvisorId"    : data.advisor_id,
+                "StudentId"    : user_id,
+                "AdvisorName"  : advisor_name,  # นักศึกษาเห็นข้อมูลอาจารย์ (อาจารย์เห็นข้อมูลนักศึกษา)
                 "StudentName"  : student_name,
                 "ResearchTopic": data.research_topic,
                 "Date"         : data.date,
                 "Time"         : data.time,
                 "Status"       : "Pending"
             },
+            CHATBOT_INTERNAL_HEADERS,
+            8,
         )
 
         return {"message": "เสร็จสิ้นการจองคิวให้คำปรึกษา"}

@@ -11,10 +11,11 @@ from datetime import datetime, timezone
 from common.timefmt import to_thai_iso
 
 # ต้องตรงกับสถานะที่ log_queue_management_history / save_auto_queue_history เขียนไว้ (ดู
-# users/router/Advisor/ManageQueueAdvisor.py, users/router/Students/Reschedule_Students.py,
-# users/router/Advisor/Reschedule_Advisor.py, common/booking_worker.py) — "Pending" ไม่มีที่มา
-# เพราะการจองใหม่ยังไม่ถูกเขียนลง QueueManagementHistory (ดูหมายเหตุใน get_notifications ด้านล่าง)
+# users/router/Students/BookingOnline.py (Pending), users/router/Advisor/ManageQueueAdvisor.py,
+# users/router/Students/Reschedule_Students.py, users/router/Advisor/Reschedule_Advisor.py, common/booking_worker.py)
+# ข้อความเดียวใช้กับทั้งสองฝ่าย (หัวข้อของรายการคือชื่ออีกฝ่าย)
 NOTIFY_STATUS_MESSAGE = {
+    "Pending": "มีคำขอจองคิว รอการอนุมัติ",
     "Approved": "คิวได้รับการอนุมัติแล้ว",
     "Rescheduled": "มีการเลื่อนนัดหมาย กรุณาตรวจสอบเวลาใหม่",
     "Completed": "การให้คำปรึกษาเสร็จสิ้นแล้ว",

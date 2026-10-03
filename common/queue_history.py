@@ -6,6 +6,8 @@
 
 from datetime import datetime
 
+RECIPIENT_CHOICES = {"both", "advisor", "student"}
+
 
 def log_queue_management_history(
     db,
@@ -17,9 +19,18 @@ def log_queue_management_history(
     status: str,
     reason: str | None,
     now: datetime,
+    recipients: str = "both",
 ) -> None:
-    db["QueueManagementHistory"].insert_many([
-        {
+    """recipients: "both" (ค่าเริ่มต้น) = อาจารย์และนักศึกษาเห็นเหตุการณ์, "advisor"/"student" = เห็นเฉพาะฝ่ายนั้น
+
+    แถวนี้คือแจ้งเตือนในแอป (กระดิ่ง) ของเจ้าของ userId — เหตุการณ์ที่ฝ่ายหนึ่งทำเอง (อนุมัติ/เลื่อนคิว) แจ้งเฉพาะ
+    ฝั่งตรงข้าม; ยกเลิก/จองคิวใหม่ (Pending)/ปิดการให้คำปรึกษาแจ้งทั้งสองฝ่าย รายการของแต่ละฝ่ายแสดงชื่ออีกฝ่าย
+    """
+    if recipients not in RECIPIENT_CHOICES:
+        raise ValueError(f"recipients must be one of {sorted(RECIPIENT_CHOICES)}, got {recipients!r}")
+    rows = []
+    if recipients in ("both", "advisor"):
+        rows.append({
             "userId"    : advisor_id,
             "role"      : "Advisor",
             "UserName"  : student_name,
@@ -27,8 +38,9 @@ def log_queue_management_history(
             "Reason"    : reason,
             "createdAt" : now,
             "updatedAt" : now,
-        },
-        {
+        })
+    if recipients in ("both", "student"):
+        rows.append({
             "userId"    : student_id,
             "role"      : "Student",
             "UserName"  : advisor_name,
@@ -36,5 +48,5 @@ def log_queue_management_history(
             "Reason"    : reason,
             "createdAt" : now,
             "updatedAt" : now,
-        },
-    ])
+        })
+    db["QueueManagementHistory"].insert_many(rows)

@@ -166,7 +166,7 @@ def bo_ctx(mongo_client, monkeypatch):
     notified = []
     monkeypatch.setattr(authUser, "Connect_MongoDB", lambda: mongo_client)
     monkeypatch.setattr(bo, "Connect_MongoDB", lambda: client)
-    monkeypatch.setattr(bo, "_notify_advisor_background", lambda url, payload: notified.append((url, payload)))
+    monkeypatch.setattr(bo, "notify_chatbot", lambda url, payload, headers, timeout=5: notified.append((url, payload)))
     # เทสต์ flow การจองไม่ต้องแตะ GridFS จริง (proxy DB ของ fixture นี้ไม่ใช่ Database จริง): บันทึกสิ่งที่ถูกเก็บ/ลบไว้ใน UPLOADS / DELETED
     UPLOADS.clear()
     DELETED.clear()
@@ -209,8 +209,14 @@ def test_create_booking_success_locks_slot_inserts_booking_and_notifies(bo_ctx):
     assert len(notified) == 1
     assert notified[0][0].endswith("/NotifyQueueAdivsor/BookingStudent")
     assert notified[0][1] == {
-        "AdvisorId": "advisor-1", "StudentName": "นายทดสอบ ระบบ", "ResearchTopic": "หัวข้อ",
+        "AdvisorId": "advisor-1", "StudentId": "student-1", "StudentName": "นายทดสอบ ระบบ", "AdvisorName": "อ.ทดสอบ",
+        "ResearchTopic": "หัวข้อ",
         "Date": FUTURE, "Time": "09:00-10:00", "Status": "Pending",
+    }
+    # แจ้งเตือนในแอปให้ทั้งสองฝ่าย (ผู้รับ = อีกฝ่ายเป็นชื่อหัวข้อ)
+    rows = list(mongo["BORC"]["QueueManagementHistory"].find({"status": "Pending"}))
+    assert {(r["userId"], r["role"], r["UserName"]) for r in rows} == {
+        ("advisor-1", "Advisor", "นายทดสอบ ระบบ"), ("student-1", "Student", "อ.ทดสอบ"),
     }
 
 
@@ -544,8 +550,12 @@ def test_student_reschedule_success_full_side_effects(rs_ctx):
     assert mongo["BORC"]["QueueManagementHistory"].count_documents({"status": "Rescheduled"}) >= 1
     assert len(notified) == 1
     assert notified[0][0].endswith("/NotifyQueueAdivsor/RecheduleAdvisor")
-    assert notified[0][1] == {"AdvisorId": "advisor-1", "StudentName": "นาย ทดสอบ ระบบ", "Date": FUTURE2,
-                              "Time": "10:00-11:00", "Status": "Rescheduled"}
+    # เลื่อนคิว: แจ้งฝั่งตรงข้ามเท่านั้น (นักศึกษาเลื่อน → อาจารย์) ไม่มี StudentId
+    assert notified[0][1] == {"AdvisorId": "advisor-1", "StudentName": "นาย ทดสอบ ระบบ",
+                              "Date": FUTURE2, "Time": "10:00-11:00", "Status": "Rescheduled"}
+    # แจ้งเตือนในแอปก็เฉพาะอาจารย์ (หัวข้อ = ชื่อนักศึกษา)
+    rows = list(mongo["BORC"]["QueueManagementHistory"].find({"status": "Rescheduled"}))
+    assert [(r["userId"], r["role"], r["UserName"]) for r in rows] == [("advisor-1", "Advisor", "นาย ทดสอบ ระบบ")]
 
 
 # ── advisor reschedule ────────────────────────────────────────────────────────
@@ -630,5 +640,9 @@ def test_advisor_reschedule_success_full_side_effects(ra_ctx):
     assert (h["rescheduledById"], h["rescheduledByRole"], h["studentId"]) == ("advisor-1", "Advisor", "student-1")
     assert len(notified) == 1
     assert notified[0][0].endswith("/NotifyQueueStudent/RecheduleStudent")
-    assert notified[0][1] == {"UserId": "student-1", "StudentName": "นาย ทดสอบ ระบบ", "Date": FUTURE2,
-                              "Time": "10:00-11:00", "Status": "Rescheduled"}
+    # เลื่อนคิว: แจ้งฝั่งตรงข้ามเท่านั้น (อาจารย์เลื่อน → นักศึกษา) พร้อมชื่ออาจารย์ให้นักศึกษาเห็น ไม่มี AdvisorId
+    assert notified[0][1] == {"UserId": "student-1", "AdvisorName": "อ.ทดสอบ", "StudentName": "นาย ทดสอบ ระบบ",
+                              "Date": FUTURE2, "Time": "10:00-11:00", "Status": "Rescheduled"}
+    # แจ้งเตือนในแอปก็เฉพาะนักศึกษา (หัวข้อ = ชื่ออาจารย์)
+    rows = list(mongo["BORC"]["QueueManagementHistory"].find({"status": "Rescheduled"}))
+    assert [(r["userId"], r["role"], r["UserName"]) for r in rows] == [("student-1", "Student", "อ.ทดสอบ")]

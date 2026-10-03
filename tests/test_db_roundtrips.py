@@ -214,7 +214,7 @@ BUDGET = {
     "student AvailableAdvisors": 5,   # +2: กฎกรองตามสาขา (หาสาขาผู้เรียก + กรองอาจารย์ตามสาขา)
     "student AvailableSlots": 4,      # +2: กฎกรองตามสาขา (assert_same_department)
     "student BookingStatus": 2,
-    "student BookingOnline (POST)": 9,  # +2: กฎกรองตามสาขา
+    "student BookingOnline (POST)": 10,  # +2: กฎกรองตามสาขา, +1: insert_many แจ้งเตือนในแอป (Pending) ให้ทั้งสองฝ่าย
     "student MyBookingDetail": 2,
     "student CheckRescheduleEligibility": 2,
     "student CancelBooking": 8,

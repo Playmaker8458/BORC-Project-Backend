@@ -154,6 +154,7 @@ def _auto_cancel_unapproved(db, col, booking, now_utc, start, end):
     # ทำให้นักศึกษาไม่รู้ว่าคิวถูกยกเลิกจนกว่าจะเปิดแอปเอง)
     notify_chatbot(f"{chatbot_uri}/NotifyQueueStudent/NotifyStudent", {
         "userId"      : booking.get("UserId", ""),
+        "AdvisorId"   : advisor_id,  # ยกเลิก: แจ้งทั้งสองฝ่าย
         "StudentName" : booking.get("StudentName", ""),
         "AdvisorName" : booking.get("Advisor_Name", ""),
         "Date"        : date_str,

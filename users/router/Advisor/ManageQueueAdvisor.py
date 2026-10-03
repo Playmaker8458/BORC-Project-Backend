@@ -200,7 +200,7 @@ def confirm_queue(request: Request, body: ConfirmBody, background_tasks: Backgro
             notify_chatbot,
             f"{chatbot_uri}/NotifyQueueStudent/NotifyStudent",
             {
-                "userId"      : booking.get("UserId", ""),
+                "userId"      : booking.get("UserId", ""),  # อนุมัติ: แจ้งเฉพาะนักศึกษา (ฝั่งตรงข้าม)
                 "StudentName" : booking.get("StudentName", ""),
                 "AdvisorName" : booking.get("Advisor_Name", ""),
                 "Date"        : booking.get("Date", ""),
@@ -233,6 +233,7 @@ def confirm_queue(request: Request, body: ConfirmBody, background_tasks: Backgro
                 status="Approved",
                 reason=None,
                 now=now,
+                recipients="student",  # อนุมัติ: แจ้งในแอปเฉพาะนักศึกษา
             ),
         )
 
@@ -318,6 +319,7 @@ def advisor_cancel_queue(request: Request, body: CancelBody, background_tasks: B
             f"{chatbot_uri}/NotifyQueueStudent/NotifyStudent",
             {
                 "userId"      : booking.get("UserId", ""),
+                "AdvisorId"   : advisor_id,  # ยกเลิก: แจ้งทั้งสองฝ่าย (อาจารย์เห็นข้อมูลนักศึกษา นักศึกษาเห็นข้อมูลอาจารย์)
                 "StudentName" : booking.get("StudentName", ""),
                 "AdvisorName" : advisor_name,
                 "Date"        : date_str,

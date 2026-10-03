@@ -81,6 +81,8 @@ def record_reschedule_history(
                 status="Rescheduled",
                 reason=reason,
                 now=now,
+                # เลื่อนคิว: แจ้งในแอปเฉพาะฝั่งตรงข้ามกับผู้เลื่อน
+                recipients="student" if actor_role == "Advisor" else "advisor",
             ),
         )
     except Exception:

@@ -219,6 +219,8 @@ def cancel_booking(request: Request, body: CancelBookingRequest, background_task
             f"{chatbot_uri}/NotifyCancelled/CancelBooking",
             {
                 "AdvisorId": advisor_id,
+                "StudentId": user_id,  # ยกเลิก: แจ้งทั้งสองฝ่าย
+                "AdvisorName": advisor_name,  # นักศึกษาเห็นข้อมูลอาจารย์
                 "StudentName": booking.get("StudentName", ""),
                 "Date": date,
                 "Time": time_str,
