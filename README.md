@@ -158,6 +158,7 @@ REST ของหน้าเว็บผ่าน proxy `/api` ของ Vercel
 | `ORIGIN_CHECK` | ไม่บังคับ (ค่าเริ่มต้น `enforce`) | `enforce` = บล็อก, `log` = บันทึกอย่างเดียว, `off` = ปิด (สวิตช์ฉุกเฉิน) |
 | `ENABLE_DOCS` | ไม่บังคับ | `true` เปิด `/docs` บน production เพื่อดีบัก (ปกติปิด) |
 | `CHAT_LINK_ALLOWED_HOSTS` | ไม่บังคับ | โดเมนที่อนุญาตสำหรับลิงก์นัดหมายในแชท (คั่นด้วยจุลภาค) ว่าง = ไม่จำกัดโดเมน (บังคับ https เสมอ) |
+| `CHATBOT_UPLOAD_TIMEOUT_SECONDS` | ไม่บังคับ (ค่าเริ่มต้น `300`) | เวลารอสูงสุดตอน ChatBot ประมวลผล PDF ที่อาจารย์อัปโหลด (ดูหัวข้อ คลังความรู้ Chatbot) ค่าที่ไม่ใช่ตัวเลขบวกจะถูกเมิน |
 | `CLOUDINARY_CLOUD_NAME`, `CLOUDINARY_API_KEY`, `CLOUDINARY_API_SECRET` | ถ้าใช้อัปโหลดรูปโปรไฟล์ | บัญชี Cloudinary สำหรับอัปโหลดรูปโปรไฟล์ (`users/router/SettingProfile.py`) |
 | `EMAIL_LOGIN`, `PASSWORD_LOGIN` | เฉพาะตอน seed แอดมินคนแรก | ใช้กับ `python Admin/AddLoginData.py` ครั้งเดียว (รหัสผ่านต้องผ่านเกณฑ์ความยาว) หลัง seed แล้วควรลบออกจาก `.env` |
 
@@ -181,9 +182,25 @@ Backend เรียก `ChatBot_URL` (แจ้งเตือนอาจา�
 router ที่เรียก ChatBot เช่น `users/router/Students/BookingOnline.py`,
 `users/router/Advisor/ManageQueueAdvisor.py` เป็นต้น)
 
-**สำคัญ**: repo นี้มีแค่ฝั่ง backend เท่านั้น — service ChatBot (ที่ให้บริการที่ `ChatBot_URL`) ต้อง
-implement การตรวจสอบ header `X-Internal-Secret` เอง (เทียบกับ `INTERNAL_SERVICE_SECRET` เดียวกัน)
-จึงจะปิดช่องโหว่ inter-service auth ได้สมบูรณ์ — งานนี้อยู่นอกขอบเขตของ repo นี้
+ฝั่ง ChatBot ตรวจ header นี้ทุก route ยกเว้น `/callback` (LINE webhook) กับ `/health` — ไม่ตรง/ไม่ส่ง = 401, ถ้า ChatBot ยังไม่ได้ตั้ง
+`INTERNAL_SERVICE_SECRET` = 503 ดังนั้น **ค่า `INTERNAL_SERVICE_SECRET` ของ backend กับ ChatBot ต้องเป็นค่าเดียวกัน** ไม่งั้นการแจ้งเตือน LINE
+และคลังความรู้ Chatbot จะใช้ไม่ได้ (backend log warning "ถูกปฏิเสธ: HTTP 401")
+
+## คลังความรู้ Chatbot (อาจารย์อัปโหลด PDF)
+
+หน้า `/ChatBotAdvisor` ของอาจารย์ไม่เรียก ChatBot ตรงๆ อีกแล้ว — เรียก backend นี้ (`users/router/Advisor/ChatbotKnowledge.py`)
+ซึ่งต้องเป็นอาจารย์ที่ล็อกอิน แล้วส่งต่อไป `ChatBot_URL` พร้อม `X-Internal-Secret` (ปลายทางเดียวกับการแจ้งเตือน LINE)
+
+| Method | Path | ส่งต่อไปที่ ChatBot | หมายเหตุ |
+|---|---|---|---|
+| `GET` | `/advisor-chatbot/files` | `GET /files` | คืน `[{file_name, file_id}]` (ชื่อซ้ำได้ ฝั่งเว็บกรองเอง) |
+| `POST` | `/advisor-chatbot/upload` | `POST /upload_pdf` | multipart field `file`; ตรวจ `.pdf`, ≤ 50 MB, ไบต์แรก `%PDF-` ก่อนส่งต่อ |
+| `DELETE` | `/advisor-chatbot/files?pdf_name=` | `DELETE /delete_file` | ส่งเฉพาะชื่อไฟล์ (ตัด path) |
+
+- error ของ ChatBot: 400/404/413 ส่งต่อพร้อมข้อความ; อย่างอื่นตอบ 502 ข้อความกลาง (ไม่ส่ง detail ภายใน) ต่อไม่ได้ = 502, หมดเวลา = 504
+- การอัปโหลดรอ ChatBot ประมวลผลจนเสร็จ (สกัดข้อความ/รูป, embedding, สรุปด้วย LLM) เวลารอสูงสุดตั้งด้วย `CHATBOT_UPLOAD_TIMEOUT_SECONDS`
+  ถ้าเรียกผ่าน proxy `/api` ของ Vercel เพดานของ Vercel อาจสั้นกว่านี้ — ไฟล์ใหญ่จึงอาจหมดเวลาที่ proxy ก่อน
+- ChatBot ตรวจ `X-Internal-Secret` ทุกคำขอจาก backend (ดูหัวข้อ Inter-service auth) จึงเรียก `/upload_pdf` `/files` `/delete_file` ของ ChatBot ตรงจากภายนอกไม่ได้
 
 ## Error handling
 

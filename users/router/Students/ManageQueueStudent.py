@@ -216,7 +216,7 @@ def cancel_booking(request: Request, body: CancelBookingRequest, background_task
         # ก็ไม่ทำให้ผู้ใช้เห็น error ทั้งที่คิวถูกยกเลิกไปแล้ว)
         background_tasks.add_task(
             notify_chatbot,
-            f"{chatbot_uri}/NotifyCancelled/CancelBookingAdvisor",
+            f"{chatbot_uri}/NotifyCancelled/CancelBooking",
             {
                 "AdvisorId": advisor_id,
                 "StudentName": booking.get("StudentName", ""),

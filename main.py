@@ -44,6 +44,7 @@ from users.router.Advisor.Reschedule_Advisor import router as RecheduleAdvisor_r
 from users.router.Advisor.Show_Consult import router as ShowConsult_router
 from users.router.Advisor.ConsultationAvailability import router as ConsultationAvailability_router
 from users.router.Advisor.QueuehistoryAdvisor import router as QueuehistoryAdvisor_router
+from users.router.Advisor.ChatbotKnowledge import router as ChatbotKnowledge_router
 from users.router.Advisor.ChatAdvisor import router as DataApproved_router, client as chat_mongo_client, db as chat_db
 
 
@@ -221,6 +222,7 @@ app.include_router(RecheduleAdvisor_router, prefix="/advisor-reschedule", tags=[
 app.include_router(ShowConsult_router, prefix="/advisor", tags=["Advisor"], dependencies=advisor_dependencies)
 app.include_router(ConsultationAvailability_router ,prefix="/advisor-schedule", tags=["Advisor"], dependencies=advisor_dependencies)
 app.include_router(QueuehistoryAdvisor_router ,prefix="/QueuehistoryAdvisor", tags=["Advisor"], dependencies=advisor_dependencies)
+app.include_router(ChatbotKnowledge_router, prefix="/advisor-chatbot", tags=["Advisor"], dependencies=advisor_dependencies)
 
 # แชท
 # หมายเหตุ: handler แต่ละตัวใน router เหล่านี้เรียก verify_user_token/ensure_user_role
