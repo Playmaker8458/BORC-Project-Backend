@@ -27,7 +27,7 @@ class UpdateDataUser(BaseModel):
 #  Helper: บันทึก History
 # ─────────────────────────────────────────
 
-def save_history(col_history, first_name: str, last_name: str, role: str, status_label: str):
+def save_history(col_history, Prefix: str, first_name: str, last_name: str, role: str, status_label: str):
     """
     บันทึกลง AccountManagementHistory ตามโครงสร้างที่ใช้แสดงในหน้าประวัติ:
       - ชื่อจริง   → firstName
@@ -36,6 +36,7 @@ def save_history(col_history, first_name: str, last_name: str, role: str, status
       - สถานะ     → statusLabel  (ยืนยันสิทธิ์แล้ว / ลบบัญชีแล้ว / แก้ไขบัญชีแล้ว)
     """
     record = {
+        "Prefix": Prefix,
         "firstName":   first_name,
         "lastName":    last_name,
         "role":        role,
@@ -108,6 +109,7 @@ def update_role_user(user_id: str, update: UpdateDataUser):
             
         save_history(
             col_history,
+            Prefix=user.get("Prefix", ""),
             first_name=user.get("Firstname", ""),
             last_name=user.get("Lastname",  ""),
             # ต้องใช้ update.Role (ค่าที่เพิ่งเขียนลง DB ข้างบน) ไม่ใช่ user.get("Role", ...)

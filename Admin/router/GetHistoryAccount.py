@@ -16,7 +16,7 @@ def get_account_history():  # def ธรรมดา: pymongo เป็น sync 
         records = list(
             col_history.find(
                 {},
-                {"_id": 0, "firstName": 1, "lastName": 1, "role": 1, "statusLabel": 1, "createdAt": 1}
+                {"_id": 0, "Prefix": 1, "firstName": 1, "lastName": 1, "role": 1, "statusLabel": 1, "createdAt": 1}
             ).sort("createdAt", -1)   # ล่าสุดก่อน
         )
         return records
