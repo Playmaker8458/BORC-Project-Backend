@@ -34,9 +34,10 @@ class DeleteUserRequest(BaseModel):
 #  Helper: บันทึก History
 # ─────────────────────────────────────────
 
-def _save_history(col_history, first_name: str, last_name: str, role: str, status_label: str):
+def _save_history(col_history, prefix: str, first_name: str, last_name: str, role: str, status_label: str):
     col_history.insert_one({
-        "firstName":   first_name,
+        "Prefix":      prefix,
+        "firstName":  first_name,
         "lastName":    last_name,
         "role":        role,           # เก็บค่าจริงจาก DB (Student / Advisor)
         "statusLabel": status_label,
@@ -143,6 +144,7 @@ def Delete_AccountUser(client, user_id: str):
 
     role            = user.get("Role", "")
     booking_user_id = user.get("userId", str(object_id))
+    prefix_name     = user.get("Prefix",    "")
     first_name      = user.get("Firstname", "")
     last_name       = user.get("Lastname",  "")
 
@@ -163,7 +165,7 @@ def Delete_AccountUser(client, user_id: str):
         invalidate_user_cache(booking_user_id)
 
         # ✅ ใช้ role จริงจาก DB ("Student")
-        _save_history(col_history, first_name, last_name, role=role, status_label="ลบบัญชีแล้ว")
+        _save_history(col_history, prefix_name, first_name, last_name, role=role, status_label="ลบบัญชีแล้ว")
 
         return {
             "message"         : "ลบบัญชีนักศึกษาเรียบร้อยแล้ว",
@@ -196,7 +198,7 @@ def Delete_AccountUser(client, user_id: str):
         invalidate_user_cache(booking_user_id)
 
         # ✅ ใช้ role จริงจาก DB ("Advisor")
-        _save_history(col_history, first_name, last_name, role=role, status_label="ลบบัญชีแล้ว")
+        _save_history(col_history, prefix_name, first_name, last_name, role=role, status_label="ลบบัญชีแล้ว")
 
         return {
             "message"          : "ลบบัญชีอาจารย์เรียบร้อยแล้ว",
@@ -277,7 +279,7 @@ def Update_AccountUser(client, body: UpdateUserRequest):
         )
 
     # ✅ ใช้ body.Role จริงๆ ("Student" / "Advisor") ไม่แปลงเป็นภาษาไทย
-    _save_history(col_history, body.Firstname, body.Lastname, role=body.Role, status_label="แก้ไขบัญชีแล้ว")
+    _save_history(col_history, body.Prefix, body.Firstname, body.Lastname, role=body.Role, status_label="แก้ไขบัญชีแล้ว")
 
     return {"message": "อัปเดตข้อมูลเรียบร้อยแล้ว", "new_name": new_name}
 
