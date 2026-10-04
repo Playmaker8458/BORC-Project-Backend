@@ -148,9 +148,7 @@ def delete_user(user_id: str):
         if not user:
             raise HTTPException(status_code=404, detail="ไม่พบผู้ใช้งานนี้ในระบบ")
 
-        # ── ลบจาก UserProfile ─────────────────────────────────────────────
-        col.delete_one({"userId": user_id})
-        invalidate_user_cache(user_id)
+        
 
         # ── บันทึก History ────────────────────────────────────────────────
         save_history(
@@ -161,6 +159,10 @@ def delete_user(user_id: str):
             role=user.get("Role", ""),
             status_label="ลบบัญชีแล้ว",
         )
+
+        # ── ลบจาก UserProfile ─────────────────────────────────────────────
+        col.delete_one({"userId": user_id})
+        invalidate_user_cache(user_id)
 
         return {"message": "ลบบัญชีสำเร็จ", "userId": user_id}
 
