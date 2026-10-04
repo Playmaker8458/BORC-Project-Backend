@@ -155,6 +155,7 @@ def delete_user(user_id: str):
         # ── บันทึก History ────────────────────────────────────────────────
         save_history(
             col_history,
+            Prefix=user.get("Prefix", ""),
             first_name=user.get("Firstname", ""),
             last_name=user.get("Lastname",  ""),
             role=user.get("Role", ""),
