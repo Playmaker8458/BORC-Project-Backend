@@ -144,7 +144,7 @@ def delete_user(user_id: str):
         col_history = db["AccountManagementHistory"]
 
         # ── ดึงข้อมูลก่อนลบ ───────────────────────────────────────────────
-        user = col.find_one({"userId": user_id}, {"_id": 0})
+        user = col.find_one({"userId": user_id})
         if not user:
             raise HTTPException(status_code=404, detail="ไม่พบผู้ใช้งานนี้ในระบบ")
 
