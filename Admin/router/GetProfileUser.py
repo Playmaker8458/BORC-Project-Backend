@@ -28,13 +28,7 @@ class UpdateDataUser(BaseModel):
 # ─────────────────────────────────────────
 
 def save_history(col_history, Prefix: str, first_name: str, last_name: str, role: str, status_label: str):
-    """
-    บันทึกลง AccountManagementHistory ตามโครงสร้างที่ใช้แสดงในหน้าประวัติ:
-      - ชื่อจริง   → firstName
-      - นามสกุล   → lastName
-      - ประเภท/สิทธิ์ → role
-      - สถานะ     → statusLabel  (ยืนยันสิทธิ์แล้ว / ลบบัญชีแล้ว / แก้ไขบัญชีแล้ว)
-    """
+    # record กำหนดข้อมูลสำหรับบันทึกลงในตาราง AccountManagementHistory 
     record = {
         "Prefix": Prefix,
         "firstName":   first_name,

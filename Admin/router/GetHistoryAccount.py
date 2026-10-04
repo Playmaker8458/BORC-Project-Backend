@@ -7,7 +7,7 @@ from Admin.Database.ConnectDB import Connect_MongoDB
 router = APIRouter()
 
 @router.get("/History")
-def get_account_history():  # def ธรรมดา: pymongo เป็น sync จึงรันใน threadpool ไม่บล็อก event loop
+def get_account_history():  
     client = Connect_MongoDB()
     try:
         db = client["BORC"]
