@@ -177,24 +177,24 @@ def _load_reschedulable_booking(db, advisor_id: str, student_id: str) -> tuple[d
 def reschedule_booking(request: Request, body: RescheduleBody, background_tasks: BackgroundTasks):
     try:
         payload    = verify_user_token(request)
-        student_id = get_user_id(payload)
-        if not student_id:
+        advisor_id = get_user_id(payload)
+        if not advisor_id:
             raise HTTPException(status_code=401, detail="ไม่พบ advisor_id ใน token")
 
         db = Connect_MongoDB()["BORC"]
-        booking, old_start, old_end = _load_reschedulable_booking(db, student_id, body.user_id)
+        booking, old_start, old_end = _load_reschedulable_booking(db, advisor_id, body.user_id)
 
         same_day = resolve_same_day_mode(
             body.mode, body.new_date, body.new_start, booking.get("Date", ""), old_start
         )
 
         ensure_slot_open_for_reschedule(
-            db, student_id, body.new_date, body.new_start, body.new_end, same_day=same_day
+            db, advisor_id, body.new_date, body.new_start, body.new_end, same_day=same_day
         )
 
         now = datetime.now(timezone.utc)
         if not move_booking_to_slot(
-            db, booking, student_id,
+            db, booking, advisor_id,
             body.new_date, body.new_start, body.new_end, old_start, old_end,
             extra_fields={"AdvisorRescheduledOnce": True},  # ไม่แตะ RescheduledOnce ของนักศึกษา
             now=now,
@@ -202,7 +202,7 @@ def reschedule_booking(request: Request, body: RescheduleBody, background_tasks:
             raise HTTPException(status_code=409, detail="สถานะคิวเปลี่ยนไปแล้ว กรุณารีเฟรชหน้าแล้วลองใหม่อีกครั้ง")
 
         # แจ้งนักศึกษาว่าอาจารย์เลื่อนคิว (background — ไม่บล็อก event loop)
-        advisor_id = booking.get("AdvisorId", "")
+        student_id = booking.get("UserId", "")
         advisor_name = booking.get("Advisor_Name", "")
         student_name = booking.get("StudentName", "")
         background_tasks.add_task(
