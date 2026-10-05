@@ -222,7 +222,7 @@ def cancel_booking(request: Request, body: CancelBookingRequest, background_task
                 "userId": user_id,  # ยกเลิก: แจ้งทั้งสองฝ่าย
                 "AdvisorId": advisor_id,
                 "StudentName": booking.get("StudentName", ""),
-                "AdvisorName": advisor_name,  # นักศึกษาเห็นข้อมูลอาจารย์
+                # "AdvisorName": advisor_name,  
                 "ResearchTopic" : booking.get("ResearchTopic", ""),
                 "Date": date,
                 "Time": time_str,

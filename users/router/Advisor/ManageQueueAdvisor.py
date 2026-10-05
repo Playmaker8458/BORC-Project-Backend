@@ -204,6 +204,7 @@ def confirm_queue(request: Request, body: ConfirmBody, background_tasks: Backgro
                 "AdvisorId"   : advisor_id,
                 "StudentName" : booking.get("StudentName", ""),
                 "AdvisorName" : booking.get("Advisor_Name", ""),
+                "ResearchTopic" : booking.get("ResearchTopic", ""),
                 "Date"        : booking.get("Date", ""),
                 "Time"        : booking.get("Time", ""),
                 "Status"      : "Approved"
