@@ -201,6 +201,7 @@ def confirm_queue(request: Request, body: ConfirmBody, background_tasks: Backgro
             f"{chatbot_uri}/NotifyQueueStudent/NotifyStudent",
             {
                 "userId"      : booking.get("UserId", ""),  # อนุมัติ: แจ้งเฉพาะนักศึกษา (ฝั่งตรงข้าม)
+                "AdvisorId"   : advisor_id,
                 "StudentName" : booking.get("StudentName", ""),
                 "AdvisorName" : booking.get("Advisor_Name", ""),
                 "Date"        : booking.get("Date", ""),

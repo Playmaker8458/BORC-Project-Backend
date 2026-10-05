@@ -159,6 +159,7 @@ def cancel_booking(request: Request, body: CancelBookingRequest, background_task
 
         db          = Connect_MongoDB()["BORC"]
         col_booking = db["BookingOnline"]
+        
         booking     = col_booking.find_one(
             {"UserId": user_id, "Status": {"$in": ACTIVE_STATUSES}}
         )
@@ -218,10 +219,11 @@ def cancel_booking(request: Request, body: CancelBookingRequest, background_task
             notify_chatbot,
             f"{chatbot_uri}/NotifyCancelled/CancelBooking",
             {
+                "userId": user_id,  # ยกเลิก: แจ้งทั้งสองฝ่าย
                 "AdvisorId": advisor_id,
-                "StudentId": user_id,  # ยกเลิก: แจ้งทั้งสองฝ่าย
-                "AdvisorName": advisor_name,  # นักศึกษาเห็นข้อมูลอาจารย์
                 "StudentName": booking.get("StudentName", ""),
+                "AdvisorName": advisor_name,  # นักศึกษาเห็นข้อมูลอาจารย์
+                "ResearchTopic" : booking.get("ResearchTopic", ""),
                 "Date": date,
                 "Time": time_str,
                 "CancelReason": body.cancelReason.strip(),

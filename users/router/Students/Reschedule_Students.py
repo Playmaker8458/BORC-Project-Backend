@@ -209,7 +209,9 @@ def reschedule_booking(request: Request, background_tasks: BackgroundTasks, data
             f"{chatbot_uri}/NotifyQueueAdivsor/RecheduleAdvisor",
             {
                 "AdvisorId"  : advisor_id,  # userId ของ Advisor
+                "StudentId"  : user_id,
                 "StudentName": student_name,
+                "ResearchTopic" : booking.get("ResearchTopic",""),
                 "Date"       : data.new_date,
                 "Time"       : f"{data.new_start}-{data.new_end}",
                 "Status"     : "Rescheduled"

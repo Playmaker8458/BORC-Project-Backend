@@ -58,9 +58,6 @@ class BookingForm:
 def get_db():
     return Connect_MongoDB()["BORC"]
 
-
-
-
 # ─── Slot helpers ─────────────────────────────────────────────────────────────
 def parse_time_range(time_str: str) -> tuple[str, str]:
     """แยก '09:00-10:00' → ('09:00', '10:00')"""
@@ -407,8 +404,8 @@ def create_booking(
             {
                 "AdvisorId"    : data.advisor_id,
                 "StudentId"    : user_id,
-                "AdvisorName"  : advisor_name,  # นักศึกษาเห็นข้อมูลอาจารย์ (อาจารย์เห็นข้อมูลนักศึกษา)
                 "StudentName"  : student_name,
+                "AdvisorName"  : advisor_name,
                 "ResearchTopic": data.research_topic,
                 "Date"         : data.date,
                 "Time"         : data.time,
