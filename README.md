@@ -151,7 +151,7 @@ REST ของหน้าเว็บผ่าน proxy `/api` ของ Vercel
 | `JWT_SECRET_KEY` | **ต้องมี** (ไม่มีแอปไม่เริ่ม) | กุญแจเซ็น JWT ของ session ควรสุ่มยาวอย่างน้อย 32 ไบต์ |
 | `MONGODB_ALART_CLIENT_URL` | **ต้องมี** | connection string ของ MongoDB Atlas |
 | `LINE_LOGIN_CHANNEL_ID`, `LINE_LOGIN_CHANNEL_SECRET`, `LINE_LOGIN_REDIRECT_URI` | **ต้องมีทั้ง 3** (ไม่มีแอปไม่เริ่ม) | LINE Login (OAuth) `LINE_LOGIN_REDIRECT_URI` ต้องตรงกับที่ตั้งใน LINE Developers และกับ `VITE_LINE_LOGIN_REDIRECT_URI` ของ Frontend |
-| `ChatBot_URL`, `INTERNAL_SERVICE_SECRET` | **ต้องมีทั้งคู่** (ไม่มีแอปไม่เริ่ม) | ปลายทางและรหัสยืนยันตัวตนตอนเรียก ChatBot (ดูหัวข้อ Inter-service auth) |
+| `ChatBot_URL`, `BORC_API_KEY` | **ต้องมีทั้งคู่** (ไม่มีแอปไม่เริ่ม) | ปลายทางและรหัสยืนยันตัวตนตอนเรียก ChatBot (ดูหัวข้อ Inter-service auth) |
 | `ENV` | แนะนำให้ตั้งเป็น `production` บน production | ถ้าไม่ตั้งจะใช้พฤติกรรมแบบ local (CORS ผ่อนปรน, ปิด `/docs` เฉพาะเมื่อเป็น production) และ **rate limit จะไม่เชื่อ header ของ proxy** (flag ของ cookie ดูจาก HTTPS ของคำขอ ไม่ได้ขึ้นกับ `ENV`) |
 | `Frontend_BORC_URL`, `Backend_BORC_URL` | แนะนำ | รายชื่อ Origin ที่อนุญาต (CORS และตัวตรวจ Origin ของ POST/PUT/PATCH/DELETE/WebSocket) ถ้า `Frontend_BORC_URL` ว่าง ตัวตรวจ Origin จะไม่ทำงาน |
 | `API_PROXY_SECRET` | ถ้าใช้ proxy `/api` ของ Vercel | ค่าเดียวกับตัวแปรชื่อเดียวกันใน Vercel ใช้ให้ rate limit นับตาม IP จริงของผู้ใช้ (ดูหัวข้อ Rate limit ด้านล่าง) ไม่ตั้ง = ทุกคนที่เข้าผ่าน proxy ใช้โควตา login ร่วมกัน |
@@ -178,18 +178,18 @@ Frontend ส่งคำขอ `/api/*` ผ่าน Vercel ไป Railway ท�
 ## Inter-service auth: Backend → ChatBot
 
 Backend เรียก `ChatBot_URL` (แจ้งเตือนอาจารย์/นักศึกษาเมื่อมีการจอง/ยกเลิก/เลื่อนนัด) พร้อมแนบ header
-`X-Internal-Secret: <INTERNAL_SERVICE_SECRET>` ทุกครั้ง (ดูตัวแปร `CHATBOT_INTERNAL_HEADERS` ในไฟล์
+`X-API-Key: <BORC_API_KEY>` ทุกครั้ง (ดูตัวแปร `CHATBOT_INTERNAL_HEADERS` ในไฟล์
 router ที่เรียก ChatBot เช่น `users/router/Students/BookingOnline.py`,
 `users/router/Advisor/ManageQueueAdvisor.py` เป็นต้น)
 
-ฝั่ง ChatBot ตรวจ header นี้ทุก route ยกเว้น `/callback` (LINE webhook) กับ `/health` — ไม่ตรง/ไม่ส่ง = 401, ถ้า ChatBot ยังไม่ได้ตั้ง
-`INTERNAL_SERVICE_SECRET` = 503 ดังนั้น **ค่า `INTERNAL_SERVICE_SECRET` ของ backend กับ ChatBot ต้องเป็นค่าเดียวกัน** ไม่งั้นการแจ้งเตือน LINE
+ฝั่ง ChatBot ตรวจ header นี้ (`app/security.py` → `require_api_key`) — ไม่ตรง/ไม่ส่ง = 401, ถ้า ChatBot ยังไม่ได้ตั้ง
+`BORC_API_KEY` = 503 "API key is not configured" ดังนั้น **ค่า `BORC_API_KEY` ของ backend กับ ChatBot ต้องเป็นค่าเดียวกัน** ไม่งั้นการแจ้งเตือน LINE
 และคลังความรู้ Chatbot จะใช้ไม่ได้ (backend log warning "ถูกปฏิเสธ: HTTP 401")
 
 ## คลังความรู้ Chatbot (อาจารย์อัปโหลด PDF)
 
 หน้า `/ChatBotAdvisor` ของอาจารย์ไม่เรียก ChatBot ตรงๆ อีกแล้ว — เรียก backend นี้ (`users/router/Advisor/ChatbotKnowledge.py`)
-ซึ่งต้องเป็นอาจารย์ที่ล็อกอิน แล้วส่งต่อไป `ChatBot_URL` พร้อม `X-Internal-Secret` (ปลายทางเดียวกับการแจ้งเตือน LINE)
+ซึ่งต้องเป็นอาจารย์ที่ล็อกอิน แล้วส่งต่อไป `ChatBot_URL` พร้อม `X-API-Key` (ปลายทางเดียวกับการแจ้งเตือน LINE)
 
 | Method | Path | ส่งต่อไปที่ ChatBot | หมายเหตุ |
 |---|---|---|---|
@@ -200,7 +200,7 @@ router ที่เรียก ChatBot เช่น `users/router/Students/Book
 - error ของ ChatBot: 400/404/413 ส่งต่อพร้อมข้อความ; อย่างอื่นตอบ 502 ข้อความกลาง (ไม่ส่ง detail ภายใน) ต่อไม่ได้ = 502, หมดเวลา = 504
 - การอัปโหลดรอ ChatBot ประมวลผลจนเสร็จ (สกัดข้อความ/รูป, embedding, สรุปด้วย LLM) เวลารอสูงสุดตั้งด้วย `CHATBOT_UPLOAD_TIMEOUT_SECONDS`
   ถ้าเรียกผ่าน proxy `/api` ของ Vercel เพดานของ Vercel อาจสั้นกว่านี้ — ไฟล์ใหญ่จึงอาจหมดเวลาที่ proxy ก่อน
-- ChatBot ตรวจ `X-Internal-Secret` ทุกคำขอจาก backend (ดูหัวข้อ Inter-service auth) จึงเรียก `/upload_pdf` `/files` `/delete_file` ของ ChatBot ตรงจากภายนอกไม่ได้
+- ChatBot ตรวจ `X-API-Key` ทุกคำขอจาก backend (ดูหัวข้อ Inter-service auth) จึงเรียก `/upload_pdf` `/files` `/delete_file` ของ ChatBot ตรงจากภายนอกไม่ได้
 
 ## Error handling
 

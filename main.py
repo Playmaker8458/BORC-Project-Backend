@@ -124,15 +124,15 @@ Frontend = (os.getenv("Frontend_BORC_URL") or "").strip()
 ChatBot = (os.getenv("ChatBot_URL") or "").strip()
 
 # ทุก router ที่แจ้งเตือนผ่าน common/notify.py ต้องพึ่ง env สองตัวนี้ (ChatBot_URL
-# ต่อเป็น URL ปลายทาง, INTERNAL_SERVICE_SECRET ใส่ header ยืนยันตัวตน) ถ้าไม่มีค่า
-# requests.post จะยิงไปที่ URL ที่ผิด (เช่น "None/...") หรือส่ง secret เป็นค่าว่าง
+# ต่อเป็น URL ปลายทาง, BORC_API_KEY ใส่ header X-API-Key ยืนยันตัวตน) ถ้าไม่มีค่า
+# requests.post จะยิงไปที่ URL ที่ผิด (เช่น "None/...") หรือส่ง key เป็นค่าว่าง
 # แล้ว notify_chatbot จะกลืน exception ไว้เงียบๆ ทำให้การแจ้งเตือนหายไปทั้งระบบ
 # โดยไม่มีใครรู้ตัว — จึง fail-fast ตอน startup แทน เหมือนที่ authUser.py ทำกับ
 # LINE_LOGIN_* env vars
 if not ChatBot:
     raise RuntimeError("ChatBot_URL is not set in environment variables")
-if not os.getenv("INTERNAL_SERVICE_SECRET"):
-    raise RuntimeError("INTERNAL_SERVICE_SECRET is not set in environment variables")
+if not os.getenv("BORC_API_KEY"):
+    raise RuntimeError("BORC_API_KEY is not set in environment variables")
 
 
 # ✅ กรอง log ที่ไม่เกี่ยวข้องออก

@@ -1,7 +1,7 @@
 """คลังความรู้ Chatbot ของอาจารย์: ส่งต่อคำสั่งอัปโหลด/ดู/ลบ PDF ไปยัง ChatBot service
 
 หน้า /ChatBotAdvisor ไม่เรียก ChatBot ตรงๆ — เรียก router นี้ (ต้องเป็นอาจารย์ที่ล็อกอิน) แล้ว backend ส่งต่อไป ChatBot_URL
-พร้อม X-Internal-Secret เหมือนการแจ้งเตือน LINE (common/notify.py) เพื่อให้ ChatBot ไม่ต้องเปิดให้เบราว์เซอร์เรียกตรง
+พร้อม X-API-Key เหมือนการแจ้งเตือน LINE (common/notify.py) เพื่อให้ ChatBot ไม่ต้องเปิดให้เบราว์เซอร์เรียกตรง
 """
 
 import logging
