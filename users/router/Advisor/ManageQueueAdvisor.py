@@ -320,7 +320,7 @@ def advisor_cancel_queue(request: Request, body: CancelBody, background_tasks: B
             notify_chatbot,
             f"{chatbot_uri}/NotifyQueueStudent/NotifyStudent",
             {
-                "StudentId"   : booking.get("UserId", ""),
+                "StudentId"   : booking.get("userId", ""),
                 "AdvisorId"   : advisor_id,  # ยกเลิก: แจ้งทั้งสองฝ่าย (อาจารย์เห็นข้อมูลนักศึกษา นักศึกษาเห็นข้อมูลอาจารย์)
                 "StudentName" : booking.get("StudentName", ""),
                 "AdvisorName" : advisor_name,
