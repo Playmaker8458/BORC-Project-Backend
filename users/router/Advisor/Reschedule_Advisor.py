@@ -209,7 +209,7 @@ def reschedule_booking(request: Request, body: RescheduleBody, background_tasks:
             notify_chatbot,
             f"{chatbot_uri}/NotifyQueueStudent/RecheduleStudent",
             {
-                "UserId"     : student_id,
+                "StudentId"  : student_id,
                 "AdvisorId"  : advisor_id,  # นักศึกษาเห็นข้อมูลอาจารย์ที่เลื่อนคิว
                 "AdvisorName": advisor_name,
                 "StudentName": student_name,
