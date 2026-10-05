@@ -203,7 +203,7 @@ def reschedule_booking(request: Request, body: RescheduleBody, background_tasks:
 
         # แจ้งนักศึกษาว่าอาจารย์เลื่อนคิว (background — ไม่บล็อก event loop)
         student_id = booking.get("UserId", "")
-        advisor_name = booking.get("AdvisorName", "")
+        advisor_name = booking.get("Advisor_Name", "")
         student_name = booking.get("StudentName", "")
         background_tasks.add_task(
             notify_chatbot,
