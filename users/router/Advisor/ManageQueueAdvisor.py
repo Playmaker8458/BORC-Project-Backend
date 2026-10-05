@@ -322,8 +322,8 @@ def advisor_cancel_queue(request: Request, body: CancelBody, background_tasks: B
             {
                 "userId"      : booking.get("UserId", ""),
                 "AdvisorId"   : advisor_id,  # ยกเลิก: แจ้งทั้งสองฝ่าย (อาจารย์เห็นข้อมูลนักศึกษา นักศึกษาเห็นข้อมูลอาจารย์)
-                "StudentName" : booking.get("StudentName", ""),
                 "AdvisorName" : advisor_name,
+                "ResearchTopic" : booking.get("ResearchTopic", ""),
                 "Date"        : date_str,
                 "Time"        : time_str,
                 "Status"      : "Cancelled"
