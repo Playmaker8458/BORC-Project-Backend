@@ -222,6 +222,7 @@ def cancel_booking(request: Request, body: CancelBookingRequest, background_task
                 "AdvisorId": advisor_id,
                 "StudentId": user_id,
                 "StudentName": booking.get("StudentName", ""),
+                "AdvisorName": advisor_name,
                 "ResearchTopic" : booking.get("ResearchTopic", ""),
                 "Date": date,
                 "Time": time_str,
