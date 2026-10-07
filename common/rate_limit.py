@@ -20,6 +20,19 @@ except ImportError:  # pragma: no cover - slowapi ไม่ได้ติดต
     Limiter = None
 
 
+_TRUTHY = {"1", "true", "yes", "on"}
+
+
+def _trust_x_real_ip() -> bool:
+    """เชื่อ header X-Real-IP หรือไม่ — ต้องเปิดเองด้วย TRUST_X_REAL_IP=true (ค่าเริ่มต้น: ไม่เชื่อ)
+
+    header นี้ผู้ใช้ส่งเองได้ทุกคำขอ จึงเชื่อได้เฉพาะเมื่อ backend อยู่หลัง proxy ที่เขียนทับค่านี้เสมอ (เช่น Railway)
+    ถ้า backend ถูกเรียกตรง (Docker เปิดพอร์ต 8000 / cloudflared) แล้วเชื่อ header นี้
+    ผู้โจมตีเปลี่ยน IP ปลอมทุกคำขอเพื่อหลบ rate limit ของ login ได้
+    """
+    return (os.getenv("TRUST_X_REAL_IP") or "").strip().lower() in _TRUTHY
+
+
 def _valid_ip(value: str) -> str | None:
     value = (value or "").strip()
     if not value or len(value) > 45:
@@ -63,7 +76,7 @@ def client_ip(request) -> str:
     หลัง proxy ของ Railway ทุกคำขอมาจาก IP ของ proxy (request.client.host) ทำให้ผู้ใช้ทุกคนใช้
     โควตาเดียวกัน (ผู้โจมตี 1 คนล็อกอินของทุกคนได้) Railway ใส่ IP ผู้ใช้จริงไว้ใน header X-Real-IP
     (docs.railway.com/networking/public-networking/specs-and-limits) จึงใช้ค่านี้เมื่อ ENV=production
-    เท่านั้น — นอก production ไม่มี proxy ที่น่าเชื่อถือ ผู้ใช้ปลอม header เองได้
+    และตั้ง TRUST_X_REAL_IP=true เท่านั้น (ต้องตั้งบน Railway) — นอก production ไม่มี proxy ที่น่าเชื่อถือ ผู้ใช้ปลอม header เองได้
 
     ไม่ใช้ X-Forwarded-For: ค่าซ้ายสุดผู้ใช้ส่งมาเองได้ เปลี่ยนไปเรื่อย ๆ เพื่อหลบ limit ได้
     ถ้า header ว่างหรือไม่ใช่ IP ที่ถูกต้อง ให้ย้อนกลับไปใช้ IP ของ peer
@@ -77,9 +90,10 @@ def resolve_client_ip(request) -> tuple[str, str]:
         proxied = _ip_from_trusted_proxy(request)
         if proxied:
             return proxied, _proxied_ip(request)[1]
-        real = _valid_ip(request.headers.get("x-real-ip") or "")
-        if real:
-            return real, "x-real-ip"
+        if _trust_x_real_ip():
+            real = _valid_ip(request.headers.get("x-real-ip") or "")
+            if real:
+                return real, "x-real-ip"
     return get_remote_address(request), "peer"
 
 

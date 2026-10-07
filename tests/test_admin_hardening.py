@@ -38,7 +38,35 @@ def _request(headers: dict, peer: str = "10.0.0.9") -> Request:
     return Request(scope)
 
 
+@pytest.fixture(autouse=True)
+def _trust_x_real_ip(monkeypatch):
+    """ตั้งค่าเหมือน Railway: เปิดให้เชื่อ X-Real-IP (เทสต์ที่ต้องการกรณีไม่เปิด ลบ env เองในเทสต์)"""
+    monkeypatch.setenv("TRUST_X_REAL_IP", "true")
+
+
 # ── 1) client IP ที่ใช้เป็นกุญแจ rate limit ────────────────────────────────────
+
+def test_x_real_ip_is_ignored_unless_trust_switch_is_on(monkeypatch):
+    """backend ที่ถูกเรียกตรง (Docker/cloudflared) ต้องไม่เชื่อ X-Real-IP ที่ผู้โจมตีปลอมได้"""
+    monkeypatch.setenv("ENV", "production")
+    req = _request({"X-Real-IP": "203.0.113.7"}, peer="10.0.0.9")
+    for value in (None, "", "false", "0", "no"):
+        if value is None:
+            monkeypatch.delenv("TRUST_X_REAL_IP")
+        else:
+            monkeypatch.setenv("TRUST_X_REAL_IP", value)
+        assert rate_limit.resolve_client_ip(req) == ("10.0.0.9", "peer")
+    monkeypatch.setenv("TRUST_X_REAL_IP", "true")
+    assert rate_limit.resolve_client_ip(req) == ("203.0.113.7", "x-real-ip")
+
+
+def test_spoofed_x_real_ip_cannot_evade_login_limit_when_switch_is_off(client, mongo_client, monkeypatch):
+    monkeypatch.setenv("ENV", "production")
+    monkeypatch.delenv("TRUST_X_REAL_IP")
+    _seed_admin(mongo_client)
+    codes = [_login(client, "wrong", {"X-Real-IP": "198.51.100.%d" % i}).status_code for i in range(7)]
+    assert codes[:5] == [401] * 5
+    assert codes[5:] == [429, 429]
 
 def test_client_ip_uses_x_real_ip_in_production(monkeypatch):
     monkeypatch.setenv("ENV", "production")
