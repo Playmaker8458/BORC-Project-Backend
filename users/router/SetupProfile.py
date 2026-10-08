@@ -8,6 +8,7 @@ from pymongo.errors import DuplicateKeyError
 from users.Database.ConnectDB import Connect_MongoDB
 import os
 from datetime import datetime, timezone
+from common.consent import consent_fields, validate_consent_version
 from common.jwt_utils import encode_token
 from common.rate_limit import limit
 from common.url_safety import UnsafeUrl, validate_https_url
@@ -64,6 +65,13 @@ class DataProfile(BaseModel):
     faculty   : str
     department: str
     imageURL  : Optional[str] = "line"
+    # ต้องยินยอมนโยบายความเป็นส่วนตัวก่อนสมัคร (บังคับ) — เวลาที่ยินยอม backend บันทึกเองจากเวลาเซิร์ฟเวอร์
+    consentVersion: str
+
+    @field_validator("consentVersion", mode="after")
+    @classmethod
+    def _consent_version_must_be_current(cls, value: str) -> str:
+        return validate_consent_version(value)
 
     @field_validator("prefix", "firstname", "lastname", mode="after")
     @classmethod
@@ -133,7 +141,8 @@ def AddData_Database(client_data, data: DataProfile):
         "deactivatedAt" : None,
         "deactivatedBy" : None,
         "createdAt"     : now,
-        "updatedAt"     : now
+        "updatedAt"     : now,
+        **consent_fields(now),
     }
 
     try:

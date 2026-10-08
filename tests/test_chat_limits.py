@@ -289,7 +289,8 @@ def _register(client, **over):
     from common.jwt_utils import encode_token
 
     body = {"prefix": "นาย", "firstname": "เอ", "lastname": "บี", "userID": "newbie",
-            "faculty": "วิทยาศาสตร์", "department": "วิทยาการคอมพิวเตอร์และปัญญาประดิษฐ์"}
+            "faculty": "วิทยาศาสตร์", "department": "วิทยาการคอมพิวเตอร์และปัญญาประดิษฐ์",
+            "consentVersion": "1.0"}
     body.update(over)
     token = encode_token({"user_id": "newbie", "registration": True}, timedelta(minutes=15))
     return client.post("/SetupProfile/AddDataProfile", json=body, cookies={"access_token": token})

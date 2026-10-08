@@ -5,9 +5,10 @@ from datetime import datetime, timedelta, timezone
 import requests  # noqa: F401  (re-export: tests patch authUser.requests.post for LINE calls)
 from dotenv import load_dotenv
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 from users.Database.ConnectDB import Connect_MongoDB
+from common.consent import consent_fields, consented_at_iso, validate_consent_version
 from common.cookies import cookie_security_flags
 from common.jwt_utils import encode_token, decode_token, JWTError
 from common.user_cache import cache_get, cache_put, invalidate_user_cache  # noqa: F401  (re-export)
@@ -577,7 +578,37 @@ def get_NavbarUsers(payload: dict = Depends(verify_user_token), response: Respon
         "Firstname": db_user["Firstname"],
         "Lastname": db_user["Lastname"],
         "ImageUrl": image_url,
+        # ความยินยอมนโยบายความเป็นส่วนตัว: None = ยังไม่เคยยินยอม (บัญชีเก่าก่อนมีระบบนี้) → frontend ขอยินยอมที่หน้าหลัก
+        "consentVersion": db_user.get("consentVersion"),
+        "consentedAt": consented_at_iso(db_user.get("consentedAt")),
     }
+
+
+class ConsentRequest(BaseModel):
+    consentVersion: str
+
+    @field_validator("consentVersion", mode="after")
+    @classmethod
+    def _must_be_current(cls, value: str) -> str:
+        return validate_consent_version(value)
+
+
+@router.post("/Consent")
+@limit("20/minute")
+def record_consent(request: Request, data: ConsentRequest, payload: dict = Depends(verify_user_token)):
+    """บันทึกว่าผู้ใช้ที่มีบัญชีอยู่แล้วยินยอมนโยบายความเป็นส่วนตัวเวอร์ชันปัจจุบัน
+    (เวลาที่ยินยอมใช้เวลาเซิร์ฟเวอร์ ไม่รับจาก client)"""
+
+    fields = consent_fields()
+    result = Connect_MongoDB()["BORC"]["UserProfile"].update_one(
+        {"userId": payload["user_id"]},
+        {"$set": fields},
+    )
+    if result.matched_count == 0:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="ไม่พบข้อมูลผู้ใช้")
+
+    invalidate_user_cache(payload["user_id"])
+    return {"consentVersion": fields["consentVersion"], "consentedAt": consented_at_iso(fields["consentedAt"])}
 
 
 # ============================================================

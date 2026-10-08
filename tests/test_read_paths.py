@@ -288,6 +288,56 @@ def test_navbar_users_is_always_fresh_from_db(auth_env):
     assert resp.json()["ImageUrl"].startswith("http://img/new.png")
 
 
+def test_navbar_users_reports_no_consent_for_legacy_account(auth_env):
+    """บัญชีเก่าที่ยังไม่เคยยินยอม → consentVersion/consentedAt เป็น None (frontend จะขอยินยอมที่หน้าหลัก)"""
+    client, mongo = auth_env
+    _seed_user(mongo, "student-1")
+
+    body = client.get("/authUser/NavbarUsers", cookies=_cookies("student-1")).json()
+
+    assert body["consentVersion"] is None
+    assert body["consentedAt"] is None
+
+
+def test_consent_endpoint_records_version_and_server_time(auth_env):
+    client, mongo = auth_env
+    _seed_user(mongo, "student-1")
+
+    resp = client.post("/authUser/Consent", json={"consentVersion": "1.0"}, cookies=_cookies("student-1"))
+
+    assert resp.status_code == 200
+    saved = mongo["BORC"]["UserProfile"].find_one({"userId": "student-1"})
+    assert saved["consentVersion"] == "1.0"
+    assert saved["consentedAt"] is not None
+    body = client.get("/authUser/NavbarUsers", cookies=_cookies("student-1")).json()
+    assert body["consentVersion"] == "1.0"
+    assert body["consentedAt"].endswith("Z")
+
+
+def test_consent_endpoint_rejects_wrong_version_and_anonymous(auth_env):
+    client, mongo = auth_env
+    _seed_user(mongo, "student-1")
+
+    assert client.post("/authUser/Consent", json={"consentVersion": "9.9"}, cookies=_cookies("student-1")).status_code == 422
+    assert client.post("/authUser/Consent", json={"consentVersion": "1.0"}).status_code == 401
+    assert "consentVersion" not in mongo["BORC"]["UserProfile"].find_one({"userId": "student-1"})
+
+
+def test_consent_flow_never_logs_the_user_out(auth_env):
+    """บันทึกความยินยอม (สำเร็จหรือถูกปฏิเสธเพราะเวอร์ชันผิด) ต้องไม่ลบ/แตะคุกกี้ session และ session ใช้ต่อได้"""
+    client, mongo = auth_env
+    _seed_user(mongo, "student-1")
+    cookies = _cookies("student-1")
+
+    ok = client.post("/authUser/Consent", json={"consentVersion": "1.0"}, cookies=cookies)
+    bad = client.post("/authUser/Consent", json={"consentVersion": "9.9"}, cookies=cookies)
+
+    assert ok.status_code == 200 and bad.status_code == 422
+    assert "set-cookie" not in ok.headers and "set-cookie" not in bad.headers
+    assert client.get("/authUser/Me", cookies=cookies).status_code == 200
+    assert client.get("/authUser/NavbarUsers", cookies=cookies).status_code == 200
+
+
 # ── cache invalidation: บัญชีที่ถูกแก้ไข/ระงับ/ลบ ต้องมีผลทันที ────────────────
 
 def test_admin_suspend_takes_effect_immediately_despite_cache(auth_env):

@@ -47,6 +47,7 @@ VALID_PAYLOAD = {
     "department": "วิทยาการคอมพิวเตอร์และปัญญาประดิษฐ์",
     "userID": "line-uid-new",
     "imageURL": "https://profile.line-scdn.net/pic.jpg",
+    "consentVersion": "1.0",
 }
 
 
@@ -179,3 +180,32 @@ def test_add_data_profile_duplicate_user_returns_conflict(client, mongo_client):
     )
 
     assert resp.status_code == 409
+
+
+def test_add_data_profile_stores_consent_with_server_time(client, mongo_client):
+    """สมัครใหม่ต้องบันทึก consentVersion และ consentedAt (เวลาเซิร์ฟเวอร์ ไม่ใช่ค่าจาก client)"""
+    client.cookies.set(COOKIE_NAME, _registration_cookie("line-uid-consent"))
+
+    payload = {**VALID_PAYLOAD, "userID": "line-uid-consent", "consentedAt": "1999-01-01T00:00:00Z"}
+    assert client.post("/SetupProfile/AddDataProfile", json=payload).status_code == 200
+
+    saved = mongo_client["BORC"]["UserProfile"].find_one({"userId": "line-uid-consent"})
+    assert saved["consentVersion"] == "1.0"
+    assert saved["consentedAt"].year >= 2026
+
+
+def test_add_data_profile_requires_consent_version(client, mongo_client):
+    client.cookies.set(COOKIE_NAME, _registration_cookie("line-uid-noconsent"))
+    payload = {k: v for k, v in VALID_PAYLOAD.items() if k != "consentVersion"}
+    payload["userID"] = "line-uid-noconsent"
+
+    assert client.post("/SetupProfile/AddDataProfile", json=payload).status_code == 422
+    assert mongo_client["BORC"]["UserProfile"].find_one({"userId": "line-uid-noconsent"}) is None
+
+
+def test_add_data_profile_rejects_unknown_consent_version(client, mongo_client):
+    client.cookies.set(COOKIE_NAME, _registration_cookie("line-uid-badver"))
+    payload = {**VALID_PAYLOAD, "userID": "line-uid-badver", "consentVersion": "0.1"}
+
+    assert client.post("/SetupProfile/AddDataProfile", json=payload).status_code == 422
+    assert mongo_client["BORC"]["UserProfile"].find_one({"userId": "line-uid-badver"}) is None

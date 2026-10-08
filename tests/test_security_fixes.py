@@ -71,6 +71,7 @@ def test_add_data_profile_issues_token_decodable_by_shared_jwt_util(
             "faculty": "วิทยาศาสตร์",
             "department": "วิทยาการคอมพิวเตอร์และปัญญาประดิษฐ์",
             "imageURL": "line",
+            "consentVersion": "1.0",
         },
         cookies={"access_token": _registration_cookie()},
     )
