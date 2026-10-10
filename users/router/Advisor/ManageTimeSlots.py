@@ -491,9 +491,6 @@ def update_time_slot(date: str, data: UpdateSlotRequest, request: Request):
             target = _find_unlocked_target(old_slots, date, data.old_start, data.old_end, "แก้ไข")
 
             # ─── นัดหมายแล้ว (มีนักศึกษาจอง) ห้ามแก้ไขช่วงเวลาก่อนถึงวันให้คำปรึกษา ───
-            # ป้องกันได้ตรงกว่าเช็คแบบอิงวันที่ปฏิทิน (เช่น "ห้ามแก้ไขเฉพาะวันพรุ่งนี้")
-            # เพราะครอบคลุมทุกนัดหมายไม่ว่าจะอยู่ห่างจากวันนี้กี่วัน และกันอาจารย์กดแก้ไข
-            # นัดหมายที่มีอยู่แล้วโดยไม่ตั้งใจไปในตัว
             time_changed = data.new_start != data.old_start or data.new_end != data.old_end
             if target.get("booked", 0) > 0 and time_changed:
                 raise HTTPException(

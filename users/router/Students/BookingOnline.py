@@ -315,12 +315,6 @@ def create_booking(
     data            : BookingForm = Depends(),
     file            : UploadFile  = File(None),
 ):
-    """
-    จอง slot กับอาจารย์ที่ปรึกษา
-    - ตรวจสอบไฟล์แนบ (PDF/DOCX ≤ 10MB)
-    - บล็อกถ้าผู้ใช้มีการจองที่ยังไม่เสร็จ (Pending/InProgress)
-    - ล็อก slot ด้วย atomic update เพื่อป้องกัน double booking
-    """
     try:
         payload = verify_user_token(request)
         user_id = get_user_id(payload)
@@ -396,8 +390,6 @@ def create_booking(
             logger.exception("[BookingOnline] จองคิวแล้ว แต่บันทึกแจ้งเตือนในแอปไม่สำเร็จ")
 
         # แจ้งเตือน LINE ทั้งอาจารย์ (มีนักศึกษาขอจอง) และนักศึกษาผู้จอง (ยืนยันว่าส่งคำขอแล้ว) — ทำงานใน background ไม่บล็อก response
-        # ผ่าน notify_chatbot เพื่อให้ log เมื่อ ChatBot ปฏิเสธ (เช่น 401 secret ไม่ตรง) ไม่ล้มเงียบ; รอ 8 วินาทีเท่าเดิม
-        # (ChatBot ส่ง LINE สองคนต่อเนื่องกัน)
         background_tasks.add_task(
             notify_chatbot,
             f"{chatbot_uri}/NotifyQueueAdivsor/BookingStudent",
@@ -427,12 +419,6 @@ def create_booking(
 # ─── GET /BookingStatus ───────────────────────────────────────────────────────
 @router.get("/BookingStatus")
 def get_booking_status(request: Request):
-    """
-    ดูสถานะการจองล่าสุดของผู้ใช้
-    - ถ้า active → คืนข้อมูล booking + can_book: False
-    - ถ้า Completed หรือ Cancelled → should_reset: True เพื่อให้ frontend reset UI
-    - ถ้าไม่มี   → can_book: True
-    """
     try:
         payload = verify_user_token(request)
         user_id = get_user_id(payload)
@@ -468,5 +454,3 @@ def get_booking_status(request: Request):
     except Exception as e:
         logger.exception("Unhandled error")
         raise HTTPException(status_code=500, detail="Internal server error")
-    except:
-        pass
