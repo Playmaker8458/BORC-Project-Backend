@@ -1,4 +1,5 @@
 import logging
+import re
 from datetime import datetime, timedelta, timezone
 
 from dotenv import load_dotenv
@@ -29,6 +30,12 @@ load_dotenv()
 # session ของแอดมิน: คุกกี้ httpOnly (JavaScript อ่านไม่ได้ — เดิมหน้าเว็บเก็บ token ใน localStorage ซึ่ง XSS ขโมยได้)
 # ยังรับ Authorization: Bearer ด้วยเพื่อ client/สคริปต์เดิม; ถ้ามีทั้งสองอย่าง Bearer มาก่อน
 ADMIN_COOKIE_NAME = "admin_token"
+# เบราว์เซอร์หนึ่งตัวล็อกอินแอดมินได้หลายบัญชีพร้อมกัน: แต่ละบัญชีมีคุกกี้ของตัวเอง (admin_token_<id>) และแต่ละแท็บบอกว่าตัวเองคือบัญชีไหน
+# ผ่าน header X-Admin-Account (ค่าเก็บใน sessionStorage ของแท็บ) — header ใช้เลือกคุกกี้เท่านั้น ไม่ใช่หลักฐานตัวตน
+# ตัวตนยังมาจาก JWT ในคุกกี้เสมอ และ user_id ใน token ต้องตรงกับ header ไม่งั้น 401
+# คุกกี้เดิม (admin_token) ยังตั้งไว้เป็นบัญชีที่ล็อกอินล่าสุด ให้แท็บ/ไคลเอนต์รุ่นเก่าที่ไม่ส่ง header ใช้งานต่อได้เหมือนเดิม
+ADMIN_ACCOUNT_HEADER = "X-Admin-Account"
+_ACCOUNT_ID_PATTERN = re.compile(r"^[0-9a-f]{24}$")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/authAdmin/Login", auto_error=False)
 
 # MODEL รูปแบบข้อมูลที่ client ต้องส่งมา
@@ -75,21 +82,71 @@ def _to_epoch(value: datetime) -> float:
     return value.timestamp()
 
 
+def admin_cookie_name(user_id: str) -> str:
+    return f"{ADMIN_COOKIE_NAME}_{user_id}"
+
+
 def set_admin_cookie(request: Request, response: Response, token: str) -> None:
-    """ตั้งคุกกี้ session แอดมิน (อายุเท่ากับ JWT) — secure/samesite ตามว่าเป็น HTTPS หรือไม่ เหมือนคุกกี้ผู้ใช้"""
-    response.set_cookie(
-        key=ADMIN_COOKIE_NAME,
-        value=token,
-        httponly=True,
-        max_age=int(SESSION_MAX_AGE.total_seconds()),
-        path="/",
-        **cookie_security_flags(request),
-    )
+    """ตั้งคุกกี้ session แอดมิน (อายุเท่ากับ JWT) — secure/samesite ตามว่าเป็น HTTPS หรือไม่ เหมือนคุกกี้ผู้ใช้
+    ตั้งสองอัน: คุกกี้ของบัญชีนี้ (admin_token_<id>) และคุกกี้เดิม (admin_token = บัญชีที่ล็อกอินล่าสุด)"""
+    user_id = decode_token(token)["user_id"]
+    for key in (admin_cookie_name(user_id), ADMIN_COOKIE_NAME):
+        response.set_cookie(
+            key=key,
+            value=token,
+            httponly=True,
+            max_age=int(SESSION_MAX_AGE.total_seconds()),
+            path="/",
+            **cookie_security_flags(request),
+        )
 
 
-# ตรวจสอบ Token ว่ามีหรือไม่ (Authorization: Bearer หรือคุกกี้ admin_token)
+def requested_account(request: Request) -> str | None:
+    """บัญชีที่แท็บนี้ระบุผ่าน header (None = ไม่ระบุ → ใช้คุกกี้เดิม); รูปแบบผิดถือเป็น 401"""
+    raw = request.headers.get(ADMIN_ACCOUNT_HEADER)
+    if raw is None:
+        return None
+    if not _ACCOUNT_ID_PATTERN.match(raw):
+        raise HTTPException(status_code=401, detail="Token ไม่ถูกต้อง")
+    return raw
+
+
+def _legacy_cookie_belongs_to(request: Request, account: str) -> bool:
+    """คุกกี้เดิม (admin_token) เป็นของบัญชีนี้หรือเสียอยู่แล้วหรือไม่ (ถ้าใช่ ควรล้างทิ้งพร้อมกัน)"""
+    legacy = request.cookies.get(ADMIN_COOKIE_NAME)
+    if not legacy:
+        return False
+    try:
+        return decode_token(legacy).get("user_id") == account
+    except JWTError:
+        return True
+
+
+def _clear_admin_cookies(request: Request, response: Response, account: str | None) -> None:
+    """ล้างคุกกี้ session แอดมิน: ไม่ระบุบัญชี = ล้างคุกกี้เดิมอย่างเดียว (เหมือนก่อนมีหลายบัญชี);
+    ระบุบัญชี = ออกเฉพาะบัญชีนั้น ลบคุกกี้ของบัญชีนี้ และลบคุกกี้เดิมเฉพาะเมื่อเป็นของบัญชีเดียวกัน (ไม่กระทบบัญชีอื่นที่ล็อกอินอยู่)"""
+    flags = cookie_security_flags(request)
+    if account is not None:
+        response.delete_cookie(key=admin_cookie_name(account), httponly=True, path="/", **flags)
+    if account is None or _legacy_cookie_belongs_to(request, account):
+        response.delete_cookie(key=ADMIN_COOKIE_NAME, httponly=True, path="/", **flags)
+
+
+def _session_token(request: Request, bearer: str | None) -> tuple[str | None, str | None]:
+    """หา token ของคำขอนี้ คืน (token, บัญชีที่แท็บระบุ)
+    Bearer มาก่อน (client/สคริปต์เดิม) → รองลงมาคือคุกกี้ของบัญชีที่แท็บระบุ → ไม่ระบุก็ใช้คุกกี้เดิม"""
+    if bearer:
+        return bearer, None
+    account = requested_account(request)
+    if account:
+        # แท็บระบุบัญชีมา → ใช้คุกกี้ของบัญชีนั้นเท่านั้น (ไม่ถอยไปใช้คุกกี้เดิม กันสวมเป็นบัญชีอื่นโดยไม่รู้ตัว)
+        return request.cookies.get(admin_cookie_name(account)), account
+    return request.cookies.get(ADMIN_COOKIE_NAME), None
+
+
+# ตรวจสอบ Token ว่ามีหรือไม่ (Authorization: Bearer หรือคุกกี้ของบัญชี/คุกกี้ admin_token)
 def verify_token(request: Request, bearer: str | None = Depends(oauth2_scheme)):
-    token = bearer or request.cookies.get(ADMIN_COOKIE_NAME)
+    token, account = _session_token(request, bearer)
     if not token:
         raise HTTPException(status_code=401, detail="ไม่พบ Token กรุณาเข้าสู่ระบบ")
 
@@ -101,6 +158,8 @@ def verify_token(request: Request, bearer: str | None = Depends(oauth2_scheme)):
         fullName = payload.get("FullName")
 
         if email is None or user_id is None or role is None or fullName is None:
+            raise HTTPException(status_code=401, detail="Token ไม่ถูกต้อง")
+        if account and user_id != account:
             raise HTTPException(status_code=401, detail="Token ไม่ถูกต้อง")
 
         # ตรวจสอบซ้ำกับฐานข้อมูลทุกครั้ง เพื่อกันกรณีบัญชี Admin ถูกลบไปแล้ว
@@ -123,6 +182,7 @@ def verify_token(request: Request, bearer: str | None = Depends(oauth2_scheme)):
         return {
             "email": email, "user_id": user_id, "role": role, "FullName" : fullName,
             "permissions": get_admin_permissions(admin),
+            "level": admin.get("Level"),
         }
 
     except HTTPException:
@@ -196,7 +256,7 @@ def login(request: Request, response: Response, data: LoginRequest):
         set_admin_cookie(request, response, access_token)
         # access_token ในตัวตอบยังคงส่งไว้ชั่วคราวเพื่อ client รุ่นเก่า (หน้าเว็บรุ่นใหม่ไม่ใช้/ไม่เก็บ ใช้คุกกี้อย่างเดียว)
         # เอาออกได้เมื่อไม่มี client รุ่นเก่าเหลือแล้ว
-        return {"access_token": access_token}
+        return {"access_token": access_token, "user_id": str(admin["_id"])}
 
     except HTTPException:
         raise
@@ -208,7 +268,7 @@ def login(request: Request, response: Response, data: LoginRequest):
 @router.post("/Logout")
 def logout(request: Request, response: Response):
     """ล้างคุกกี้ session แอดมิน (คุกกี้ httpOnly ลบจากหน้าเว็บเองไม่ได้ ต้องให้ backend สั่งลบ) — เรียกซ้ำได้ไม่ error"""
-    response.delete_cookie(key=ADMIN_COOKIE_NAME, httponly=True, path="/", **cookie_security_flags(request))
+    _clear_admin_cookies(request, response, requested_account(request))
     return {"message": "ออกจากระบบสำเร็จ"}
 
 
@@ -217,6 +277,8 @@ def logout(request: Request, response: Response):
 def get_me(payload: dict = Depends(verify_token)):
     return {
         "FullName": payload["FullName"],
+        "email"   : payload["email"],  # ให้หน้าเว็บแสดงว่าตอนนี้ล็อกอินเป็นบัญชีไหน
+        "level"   : payload["level"],  # ป้ายระดับ (mid/low) ให้หน้าเว็บแสดงเป็นภาษาไทย; None = ไม่เคยระบุ
         "user_id" : payload["user_id"],
         "role"    : payload["role"],
         "permissions": payload["permissions"],
