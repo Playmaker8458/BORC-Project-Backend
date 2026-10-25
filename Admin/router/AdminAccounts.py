@@ -18,7 +18,7 @@ MIN_PASSWORD_LENGTH = 12
 MAX_PASSWORD_BYTES = 72  # ขีดจำกัดของ bcrypt 5.x
 EMAIL_PATTERN = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 # ป้ายระดับของบัญชี (เป็นข้อมูลไว้ดูเท่านั้น ไม่มีผลต่อสิทธิ์ — สิทธิ์จริงตัดสินที่ Permissions)
-ADMIN_LEVELS = ("full", "mid", "low")
+ADMIN_LEVELS = ("mid", "low")
 
 router = APIRouter()
 
