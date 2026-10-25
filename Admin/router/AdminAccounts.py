@@ -1,6 +1,7 @@
 import logging
 import re
 from datetime import datetime, timezone
+from typing import Optional
 
 import bcrypt
 from bson import ObjectId
@@ -16,6 +17,8 @@ logger = logging.getLogger(__name__)
 MIN_PASSWORD_LENGTH = 12
 MAX_PASSWORD_BYTES = 72  # ขีดจำกัดของ bcrypt 5.x
 EMAIL_PATTERN = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+# ป้ายระดับของบัญชี (เป็นข้อมูลไว้ดูเท่านั้น ไม่มีผลต่อสิทธิ์ — สิทธิ์จริงตัดสินที่ Permissions)
+ADMIN_LEVELS = ("full", "mid", "low")
 
 router = APIRouter()
 
@@ -25,10 +28,12 @@ class CreateAdmin(BaseModel):
     password        : str
     confirm_password: str
     permissions     : list[str]
+    level           : Optional[str] = None
 
 
 class UpdateAdminPermissions(BaseModel):
     permissions: list[str]
+    level      : Optional[str] = None
 
 
 def _admin_col():
@@ -43,6 +48,12 @@ def _clean_permissions(values: list[str]) -> list[str]:
     if not permissions:
         raise HTTPException(status_code=400, detail="ต้องเลือกสิทธิ์อย่างน้อย 1 รายการ")
     return permissions
+
+
+def _validated_level(value: Optional[str]) -> Optional[str]:
+    if value is not None and value not in ADMIN_LEVELS:
+        raise HTTPException(status_code=400, detail="ระดับผู้ดูแลระบบไม่ถูกต้อง")
+    return value
 
 
 def _validated_email(raw: str) -> str:
@@ -119,6 +130,7 @@ def list_admins(payload: dict = Depends(verify_token)):
             "_id"        : str(d["_id"]),
             "Email"      : d.get("Email", ""),
             "Permissions": get_admin_permissions(d),
+            "Level"      : d.get("Level"),
             "createdAt"  : d.get("createdAt"),
             "createdBy"  : d.get("createdBy"),
             "isProtected": _is_protected(d),
@@ -131,12 +143,16 @@ def list_admins(payload: dict = Depends(verify_token)):
 @router.patch("/{admin_id}")
 def update_admin_permissions(admin_id: str, data: UpdateAdminPermissions, payload: dict = Depends(verify_token)):
     permissions = _clean_permissions(data.permissions)
+    level = _validated_level(data.level)
     try:
         col = _admin_col()
         admin = _load_target(col, admin_id, payload)
         if _is_full(admin) and len(permissions) < len(ADMIN_PERMISSIONS) and not _other_full_admin_exists(col, admin["_id"]):
             raise HTTPException(status_code=409, detail="ต้องเหลือผู้ดูแลระบบที่มีสิทธิ์เต็มอย่างน้อย 1 คน")
-        col.update_one({"_id": admin["_id"]}, {"$set": {"Permissions": permissions, "updatedAt": datetime.now(timezone.utc)}})
+        changes = {"Permissions": permissions, "updatedAt": datetime.now(timezone.utc)}
+        if level is not None:  # ไม่ส่งระดับมา = คงป้ายเดิมไว้
+            changes["Level"] = level
+        col.update_one({"_id": admin["_id"]}, {"$set": changes})
     except HTTPException:
         raise
     except Exception:
@@ -166,6 +182,7 @@ def create_admin(data: CreateAdmin, payload: dict = Depends(verify_token)):
     email = _validated_email(data.email)
     password_bytes = _validated_password_bytes(data.password, data.confirm_password)
     permissions = _clean_permissions(data.permissions)
+    level = _validated_level(data.level)
 
     try:
         col = _admin_col()
@@ -177,6 +194,7 @@ def create_admin(data: CreateAdmin, payload: dict = Depends(verify_token)):
             "Email"      : email,  # เก็บตามที่พิมพ์: Login เทียบอีเมลแบบตรงตัว
             "Password"   : bcrypt.hashpw(password_bytes, bcrypt.gensalt()).decode("utf-8"),
             "Permissions": permissions,
+            **({"Level": level} if level is not None else {}),
             "createdBy"  : payload["email"],  # ใช้แยกบัญชีแรกสุด (ไม่มีค่านี้) ออกจากบัญชีที่สร้างผ่านหน้าเว็บ
             "createdAt"  : now,
             "updatedAt"  : now,
