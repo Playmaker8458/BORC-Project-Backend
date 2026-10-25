@@ -16,7 +16,9 @@ logger = logging.getLogger(__name__)
 
 MIN_PASSWORD_LENGTH = 12
 MAX_PASSWORD_BYTES = 72  # ขีดจำกัดของ bcrypt 5.x
-EMAIL_PATTERN = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+# อีเมลบัญชีใหม่รับเฉพาะอักขระ ASCII ปกติ: เคยมีบัญชีที่พิมพ์ตอนคีย์บอร์ดเป็นภาษาไทย ทำให้มีสระ/อักขระไทยติดหน้าอีเมลโดยมองไม่เห็น
+# แล้วล็อกอินไม่ได้โดยไม่รู้สาเหตุ (การล็อกอินไม่ใช้กฎนี้ เพื่อให้บัญชีเดิมที่เป็นแบบนั้นยังเข้าและลบได้)
+EMAIL_PATTERN = re.compile(r"^[A-Za-z0-9._%+\-]+@[A-Za-z0-9\-]+(\.[A-Za-z0-9\-]+)+$")
 # ป้ายระดับของบัญชี (เป็นข้อมูลไว้ดูเท่านั้น ไม่มีผลต่อสิทธิ์ — สิทธิ์จริงตัดสินที่ Permissions)
 ADMIN_LEVELS = ("mid", "low")
 
@@ -40,6 +42,33 @@ def _admin_col():
     return Connect_MongoDB()["BORC"]["LoginAdmin"]
 
 
+# ป้ายสถานะของเหตุการณ์บัญชีผู้ดูแลระบบในตารางประวัติ (ตารางเดียวกับการจัดการบัญชีผู้ใช้งาน แยกด้วย kind="admin")
+EVENT_CREATED = "สร้างบัญชีผู้ดูแลระบบแล้ว"
+EVENT_UPDATED = "แก้สิทธิ์ผู้ดูแลระบบแล้ว"
+EVENT_DELETED = "ลบบัญชีผู้ดูแลระบบแล้ว"
+
+
+def _log_admin_event(label: str, target_email: str, actor_email: str,
+                     permissions: Optional[list[str]] = None, level: Optional[str] = None) -> None:
+    """บันทึกประวัติการสร้าง/แก้สิทธิ์/ลบบัญชีผู้ดูแลระบบ (ผู้ที่มีสิทธิ์ "เพิ่มบัญชีผู้ดูแลระบบ" เท่านั้นที่เห็นในหน้าประวัติ)
+    บันทึกไม่สำเร็จไม่ทำให้การกระทำหลักล้มเหลว (การสร้าง/แก้/ลบสำเร็จไปแล้ว) แต่จะมี log ให้ตามดู"""
+    try:
+        Connect_MongoDB()["BORC"]["AccountManagementHistory"].insert_one({
+            "kind"        : "admin",
+            "Prefix"      : "",
+            "firstName"   : target_email,  # ตารางประวัติแสดงอีเมลของบัญชีที่ถูกกระทำในช่องชื่อ
+            "lastName"    : "",
+            "role"        : "Admin",
+            "statusLabel" : label,
+            "actorEmail"  : actor_email,
+            "permissions" : permissions,
+            "level"       : level,
+            "createdAt"   : datetime.now(timezone.utc),
+        })
+    except Exception:
+        logger.exception("บันทึกประวัติบัญชีผู้ดูแลระบบไม่สำเร็จ")
+
+
 def _clean_permissions(values: list[str]) -> list[str]:
     unknown = [p for p in values if p not in ADMIN_PERMISSIONS]
     if unknown:
@@ -58,6 +87,8 @@ def _validated_level(value: Optional[str]) -> Optional[str]:
 
 def _validated_email(raw: str) -> str:
     email = raw.strip()
+    if not email.isascii():
+        raise HTTPException(status_code=400, detail="อีเมลต้องเป็นตัวอักษรภาษาอังกฤษ ตัวเลข และสัญลักษณ์ปกติเท่านั้น (ตรวจว่าคีย์บอร์ดไม่ได้เป็นภาษาไทย)")
     if not EMAIL_PATTERN.match(email):
         raise HTTPException(status_code=400, detail="รูปแบบอีเมลไม่ถูกต้อง")
     return email
@@ -153,6 +184,7 @@ def update_admin_permissions(admin_id: str, data: UpdateAdminPermissions, payloa
         if level is not None:  # ไม่ส่งระดับมา = คงป้ายเดิมไว้
             changes["Level"] = level
         col.update_one({"_id": admin["_id"]}, {"$set": changes})
+        _log_admin_event(EVENT_UPDATED, admin.get("Email", ""), payload["email"], permissions, level or admin.get("Level"))
     except HTTPException:
         raise
     except Exception:
@@ -168,7 +200,8 @@ def delete_admin(admin_id: str, payload: dict = Depends(verify_token)):
         admin = _load_target(col, admin_id, payload)
         if _is_full(admin) and not _other_full_admin_exists(col, admin["_id"]):
             raise HTTPException(status_code=409, detail="ต้องเหลือผู้ดูแลระบบที่มีสิทธิ์เต็มอย่างน้อย 1 คน")
-        col.delete_one({"_id": admin["_id"]})  # session ของบัญชีนี้ใช้ไม่ได้ทันที: verify_token ตรวจ DB ทุกคำขอ
+        col.delete_one({"_id": admin["_id"]})
+        _log_admin_event(EVENT_DELETED, admin.get("Email", ""), payload["email"])  # session ของบัญชีนี้ใช้ไม่ได้ทันที: verify_token ตรวจ DB ทุกคำขอ
     except HTTPException:
         raise
     except Exception:
@@ -199,6 +232,7 @@ def create_admin(data: CreateAdmin, payload: dict = Depends(verify_token)):
             "createdAt"  : now,
             "updatedAt"  : now,
         })
+        _log_admin_event(EVENT_CREATED, email, payload["email"], permissions, level)
     except HTTPException:
         raise
     except Exception:
