@@ -43,9 +43,9 @@ def _admin_col():
 
 
 # ป้ายสถานะของเหตุการณ์บัญชีผู้ดูแลระบบในตารางประวัติ (ตารางเดียวกับการจัดการบัญชีผู้ใช้งาน แยกด้วย kind="admin")
-EVENT_CREATED = "สร้างบัญชีผู้ดูแลระบบแล้ว"
-EVENT_UPDATED = "แก้สิทธิ์ผู้ดูแลระบบแล้ว"
-EVENT_DELETED = "ลบบัญชีผู้ดูแลระบบแล้ว"
+EVENT_CREATED = "สร้างบัญชีแล้ว"
+EVENT_UPDATED = "แก้ไขบัญชีแล้ว"
+EVENT_DELETED = "ลบบัญชีแล้ว"
 
 
 def _log_admin_event(label: str, target_email: str, actor_email: str,
