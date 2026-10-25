@@ -1,10 +1,19 @@
+"""หน้า "จัดการบัญชี" ทั้งสองแท็บ ใช้ router ตัวเดียว mount ที่ /ManagementAccount
+- แท็บผู้ใช้งาน (นักศึกษา/อาจารย์) ดู แก้ไข ลบ    → สิทธิ์ manage
+- แท็บผู้ดูแลระบบ ดูรายการ แก้สิทธิ์ ลบ            → สิทธิ์ add
+สิทธิ์ผูกที่แต่ละ endpoint (manage_only / add_only) เพราะสองแท็บใช้สิทธิ์ต่างกัน; main.py ครอบด้วย require_admin อีกชั้น
+การอนุมัติผู้สมัครใหม่เป็นของหน้า "ยืนยันการเข้าสู่ระบบ" (LoginVerification.py) การสร้างบัญชีผู้ดูแลระบบเป็นของ AddAdmin.py"""
+
 import logging
 import re
 
 logger = logging.getLogger(__name__)
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from Admin.Database.ConnectDB import Connect_MongoDB
+from Admin.admin_account_rules import admin_col, clean_permissions, log_admin_event, validated_level
+from Admin.auth.authAdmin import ADMIN_PERMISSIONS, get_admin_permissions, require_permission, verify_token
 from common.account_cleanup import purge_account_data
+from common.account_history import DELETED, EDITED, record_user_history
 from common.user_cache import invalidate_user_cache
 from common.attachments import delete_attachments
 from common.notify import CHATBOT_INTERNAL_HEADERS, CHATBOT_URL, notify_chatbot
@@ -12,11 +21,16 @@ from common.booking_status import ACTIVE_STATUSES
 from common.year_level import YEAR_LEVELS, parse_year_level, year_level_for_storage
 from common.slot_service import recalculate_slot_booked, split_time_range
 from bson import ObjectId
+from bson.errors import InvalidId
 from pydantic import BaseModel, StrictInt, field_validator
 from datetime import datetime, timezone
 from typing import Literal, Optional
 
 router = APIRouter()
+
+# สิทธิ์ผูกรายเส้นทาง: แท็บผู้ใช้งาน = manage, แท็บผู้ดูแลระบบ = add
+manage_only = [Depends(require_permission("manage"))]
+add_only = [Depends(require_permission("add"))]
 
 class UpdateUserRequest(BaseModel):
     id: str
@@ -47,17 +61,6 @@ class DeleteUserRequest(BaseModel):
 # ─────────────────────────────────────────
 #  Helper: บันทึก History
 # ─────────────────────────────────────────
-
-def _save_history(col_history, prefix: str, first_name: str, last_name: str, role: str, status_label: str):
-    col_history.insert_one({
-        "Prefix":      prefix,
-        "firstName":  first_name,
-        "lastName":    last_name,
-        "role":        role,           # เก็บค่าจริงจาก DB (Student / Advisor)
-        "statusLabel": status_label,
-        "createdAt":   datetime.now(timezone.utc),
-    })
-
 
 def _attachment_ids(col_booking, booking_filter: dict) -> list:
     """id ของไฟล์แนบทุกไฟล์ในคิวที่กำลังจะถูกลบ (ต้องดึงก่อนลบ) — ลบบัญชีต้องลบเอกสารวิจัยตามไปด้วย"""
@@ -179,7 +182,7 @@ def Delete_AccountUser(client, user_id: str):
         invalidate_user_cache(booking_user_id)
 
         # ✅ ใช้ role จริงจาก DB ("Student")
-        _save_history(col_history, prefix_name, first_name, last_name, role=role, status_label="ลบบัญชีแล้ว")
+        record_user_history(col_history, prefix_name, first_name, last_name, role=role, status_label=DELETED)
 
         return {
             "message"         : "ลบบัญชีนักศึกษาเรียบร้อยแล้ว",
@@ -212,7 +215,7 @@ def Delete_AccountUser(client, user_id: str):
         invalidate_user_cache(booking_user_id)
 
         # ✅ ใช้ role จริงจาก DB ("Advisor")
-        _save_history(col_history, prefix_name, first_name, last_name, role=role, status_label="ลบบัญชีแล้ว")
+        record_user_history(col_history, prefix_name, first_name, last_name, role=role, status_label=DELETED)
 
         return {
             "message"          : "ลบบัญชีอาจารย์เรียบร้อยแล้ว",
@@ -308,7 +311,7 @@ def Update_AccountUser(client, body: UpdateUserRequest):
         )
 
     # ✅ ใช้ body.Role จริงๆ ("Student" / "Advisor") ไม่แปลงเป็นภาษาไทย
-    _save_history(col_history, body.Prefix, body.Firstname, body.Lastname, role=body.Role, status_label="แก้ไขบัญชีแล้ว")
+    record_user_history(col_history, body.Prefix, body.Firstname, body.Lastname, role=body.Role, status_label=EDITED)
 
     return {"message": "อัปเดตข้อมูลเรียบร้อยแล้ว", "new_name": new_name}
 
@@ -317,7 +320,7 @@ def Update_AccountUser(client, body: UpdateUserRequest):
 #  Routes
 # ─────────────────────────────────────────
 
-@router.get("/ShowAccountUser")
+@router.get("/ShowAccountUser", dependencies=manage_only)
 def ShowAccountUser(
     page: int = Query(1, ge=1),
     limit: int = Query(10, ge=1, le=100),
@@ -334,7 +337,7 @@ def ShowAccountUser(
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
-@router.delete("/DeleteAccountUser")
+@router.delete("/DeleteAccountUser", dependencies=manage_only)
 def DeleteAccountUser(body: DeleteUserRequest):
     try:
         client = Connect_MongoDB()
@@ -346,7 +349,7 @@ def DeleteAccountUser(body: DeleteUserRequest):
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
-@router.put("/UpdateAccountUser")
+@router.put("/UpdateAccountUser", dependencies=manage_only)
 def UpdateAccountUser(body: UpdateUserRequest):
     try:
         client = Connect_MongoDB()
@@ -358,7 +361,7 @@ def UpdateAccountUser(body: UpdateUserRequest):
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
-@router.post("/SyncAllSlots")
+@router.post("/SyncAllSlots", dependencies=manage_only)
 def SyncAllSlots():
     """Force-sync booked/isLocked ของทุก slot กับ booking จริง (ใช้เมื่อข้อมูล slot ไม่ตรงกับคิว)
 
@@ -384,3 +387,110 @@ def SyncAllSlots():
     except Exception:
         logger.exception("Unhandled error")
         raise HTTPException(status_code=500, detail="Internal server error")
+
+
+# ═════════════════════════════════════════════════════════════════════════
+#  บัญชีผู้ดูแลระบบ (แท็บ "ผู้ดูแลระบบ" ของหน้าจัดการบัญชี) — สิทธิ์ add
+# ═════════════════════════════════════════════════════════════════════════
+
+class UpdateAdminPermissions(BaseModel):
+    permissions: list[str]
+    level      : Optional[str] = None
+
+
+def _is_protected(admin: dict) -> bool:
+    """บัญชีแรกสุดของระบบ (seed) ไม่มี createdBy — ห้ามลบ/ลดสิทธิ์ผ่านแอป (เปลี่ยนใน DB เองเท่านั้น)"""
+    return admin.get("createdBy") is None
+
+
+def _is_full(admin: dict) -> bool:
+    return len(get_admin_permissions(admin)) == len(ADMIN_PERMISSIONS)
+
+
+def _other_full_admin_exists(col, admin_id: ObjectId) -> bool:
+    # แอดมินเดิมที่ไม่มีฟิลด์ Permissions นับเป็นสิทธิ์เต็ม (ตรงกับ get_admin_permissions)
+    return col.find_one({
+        "_id": {"$ne": admin_id},
+        "$or": [
+            {"Permissions": {"$exists": False}},
+            {"Permissions": None},
+            {"Permissions": {"$all": list(ADMIN_PERMISSIONS)}},
+        ],
+    }) is not None
+
+
+def _load_target_admin(col, admin_id: str, payload: dict) -> dict:
+    """โหลดบัญชีเป้าหมาย + กฎร่วมของการลบ/แก้สิทธิ์: ไม่ใช่ตัวเอง และไม่ใช่บัญชีแรกสุด"""
+    try:
+        oid = ObjectId(admin_id)
+    except (InvalidId, TypeError):
+        raise HTTPException(status_code=404, detail="ไม่พบบัญชีผู้ดูแลระบบนี้")
+    admin = col.find_one({"_id": oid})
+    if admin is None:
+        raise HTTPException(status_code=404, detail="ไม่พบบัญชีผู้ดูแลระบบนี้")
+    if str(oid) == payload["user_id"]:
+        raise HTTPException(status_code=403, detail="ไม่สามารถลบหรือแก้สิทธิ์ของบัญชีตัวเองได้")
+    if _is_protected(admin):
+        raise HTTPException(status_code=403, detail="บัญชีผู้ดูแลระบบแรกสุดของระบบ ลบหรือลดสิทธิ์ผ่านหน้านี้ไม่ได้")
+    return admin
+
+
+@router.get("/ShowAdminAccounts", dependencies=add_only)
+def list_admins(payload: dict = Depends(verify_token)):
+    try:
+        docs = list(admin_col().find({}).sort("_id", 1))
+    except Exception:
+        logger.exception("โหลดรายการผู้ดูแลระบบไม่สำเร็จ")
+        raise HTTPException(status_code=500, detail="Internal server error")
+    return [
+        {
+            "_id"        : str(d["_id"]),
+            "Email"      : d.get("Email", ""),
+            "Permissions": get_admin_permissions(d),
+            "Level"      : d.get("Level"),
+            "createdAt"  : d.get("createdAt"),
+            "createdBy"  : d.get("createdBy"),
+            "isProtected": _is_protected(d),
+            "isSelf"     : str(d["_id"]) == payload["user_id"],
+        }
+        for d in docs
+    ]
+
+
+@router.put("/UpdateAdminAccount/{admin_id}", dependencies=add_only)
+def update_admin_permissions(admin_id: str, data: UpdateAdminPermissions, payload: dict = Depends(verify_token)):
+    permissions = clean_permissions(data.permissions)
+    level = validated_level(data.level)
+    try:
+        col = admin_col()
+        admin = _load_target_admin(col, admin_id, payload)
+        if _is_full(admin) and len(permissions) < len(ADMIN_PERMISSIONS) and not _other_full_admin_exists(col, admin["_id"]):
+            raise HTTPException(status_code=409, detail="ต้องเหลือผู้ดูแลระบบที่มีสิทธิ์เต็มอย่างน้อย 1 คน")
+        changes = {"Permissions": permissions, "updatedAt": datetime.now(timezone.utc)}
+        if level is not None:  # ไม่ส่งระดับมา = คงป้ายเดิมไว้
+            changes["Level"] = level
+        col.update_one({"_id": admin["_id"]}, {"$set": changes})
+        log_admin_event(EDITED, admin.get("Email", ""), payload["email"], permissions, level or admin.get("Level"))
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("แก้สิทธิ์ผู้ดูแลระบบไม่สำเร็จ")
+        raise HTTPException(status_code=500, detail="Internal server error")
+    return {"message": "แก้สิทธิ์ผู้ดูแลระบบสำเร็จ", "permissions": permissions}
+
+
+@router.delete("/DeleteAdminAccount/{admin_id}", dependencies=add_only)
+def delete_admin(admin_id: str, payload: dict = Depends(verify_token)):
+    try:
+        col = admin_col()
+        admin = _load_target_admin(col, admin_id, payload)
+        if _is_full(admin) and not _other_full_admin_exists(col, admin["_id"]):
+            raise HTTPException(status_code=409, detail="ต้องเหลือผู้ดูแลระบบที่มีสิทธิ์เต็มอย่างน้อย 1 คน")
+        col.delete_one({"_id": admin["_id"]})
+        log_admin_event(DELETED, admin.get("Email", ""), payload["email"])  # session ของบัญชีนี้ใช้ไม่ได้ทันที: verify_token ตรวจ DB ทุกคำขอ
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("ลบบัญชีผู้ดูแลระบบไม่สำเร็จ")
+        raise HTTPException(status_code=500, detail="Internal server error")
+    return {"message": "ลบบัญชีผู้ดูแลระบบสำเร็จ"}

@@ -195,24 +195,24 @@ def auth_env(mongo_client, monkeypatch):
     from users.auth import authUser
     from users.router import SettingProfile
     from Admin.auth import authAdmin
-    from Admin.router import GetProfileUser, ManagementAccount
+    from Admin.router import LoginVerification, ManagementAccount
 
     monkeypatch.setattr(authUser, "Connect_MongoDB", lambda: mongo_client)
     monkeypatch.setattr(SettingProfile, "Connect_MongoDB", lambda: mongo_client)
-    monkeypatch.setattr(GetProfileUser, "Connect_MongoDB", lambda: mongo_client)
+    monkeypatch.setattr(LoginVerification, "Connect_MongoDB", lambda: mongo_client)
     monkeypatch.setattr(ManagementAccount, "Connect_MongoDB", lambda: mongo_client)
     monkeypatch.setattr(authAdmin, "Connect_MongoDB", lambda: mongo_client)
 
     app = FastAPI()
     app.include_router(authUser.router, prefix="/authUser")
     app.include_router(SettingProfile.router, prefix="/settingProfile")
-    app.include_router(GetProfileUser.router)
+    app.include_router(LoginVerification.router)
     app.include_router(ManagementAccount.router)
     return TestClient(app), mongo_client
 
 
 def _full_admin(mongo):
-    """header ของแอดมินสิทธิ์เต็ม (ไม่มีฟิลด์ Permissions เหมือนแอดมินเดิม) สำหรับ endpoint /Profile ที่ต้องรู้ตัวผู้เรียก"""
+    """header ของแอดมินสิทธิ์เต็ม (ไม่มีฟิลด์ Permissions เหมือนแอดมินเดิม): endpoint ของ ManagementAccount ผูกสิทธิ์รายเส้นทาง"""
     from tests.test_admin_verify_boundary import admin_headers
     return admin_headers(mongo, None)
 
@@ -348,23 +348,24 @@ def test_consent_flow_never_logs_the_user_out(auth_env):
 
 # ── cache invalidation: บัญชีที่ถูกแก้ไข/ระงับ/ลบ ต้องมีผลทันที ────────────────
 
-def test_admin_suspend_takes_effect_immediately_despite_cache(auth_env):
+def test_admin_approve_takes_effect_immediately_despite_cache(auth_env):
     client, mongo = auth_env
-    _seed_user(mongo, "student-1")
-    assert client.get("/authUser/Me", cookies=_cookies("student-1")).status_code == 200  # อุ่น cache
+    _seed_user(mongo, "student-1", status="Pending", role="")
+    assert client.get("/authUser/Me", cookies=_cookies("student-1")).status_code == 403  # อุ่น cache ตอนยังรอยืนยัน
 
-    resp = client.patch("/Profile/student-1", json={"Role": "Student", "Status": "Suspended"}, headers=_full_admin(mongo))
+    resp = client.put("/Profile/student-1", json={"Role": "Student", "Status": "Approved"})
     assert resp.status_code == 200
 
-    assert client.get("/authUser/Me", cookies=_cookies("student-1")).status_code == 403
-
-
-def test_admin_delete_profile_takes_effect_immediately(auth_env):
-    client, mongo = auth_env
-    _seed_user(mongo, "student-1")
     assert client.get("/authUser/Me", cookies=_cookies("student-1")).status_code == 200
 
-    resp = client.delete("/Profile/student-1", headers=_full_admin(mongo))
+
+def test_admin_delete_account_takes_effect_immediately(auth_env):
+    client, mongo = auth_env
+    _seed_user(mongo, "student-1")
+    oid = str(mongo["BORC"]["UserProfile"].find_one({"userId": "student-1"})["_id"])
+    assert client.get("/authUser/Me", cookies=_cookies("student-1")).status_code == 200
+
+    resp = client.request("DELETE", "/DeleteAccountUser", json={"id": oid}, headers=_full_admin(mongo))
     assert resp.status_code == 200
 
     assert client.get("/authUser/Me", cookies=_cookies("student-1")).status_code == 401
@@ -379,7 +380,7 @@ def test_admin_update_account_takes_effect_immediately(auth_env):
     resp = client.put("/UpdateAccountUser", json={
         "id": oid, "Prefix": "นาง", "Firstname": "ใหม่", "Lastname": "ชื่อ", "Role": "Student",
         "Status": "Suspended", "Faculty": "", "Department": "", "YearLevel": "1",
-    })
+    }, headers=_full_admin(mongo))
     assert resp.status_code == 200
 
     assert client.get("/authUser/Me", cookies=_cookies("student-1")).status_code == 403
@@ -391,7 +392,7 @@ def test_admin_delete_account_user_takes_effect_immediately(auth_env):
     oid = str(mongo["BORC"]["UserProfile"].find_one({"userId": "student-1"})["_id"])
     assert client.get("/authUser/Me", cookies=_cookies("student-1")).status_code == 200
 
-    resp = client.request("DELETE", "/DeleteAccountUser", json={"id": oid})
+    resp = client.request("DELETE", "/DeleteAccountUser", json={"id": oid}, headers=_full_admin(mongo))
     assert resp.status_code == 200
 
     assert client.get("/authUser/Me", cookies=_cookies("student-1")).status_code == 401
@@ -402,7 +403,7 @@ def test_name_change_reflected_immediately_in_me(auth_env):
     _seed_user(mongo, "student-1", Prefix="นาย", Firstname="เก่า", Lastname="ชื่อ")
     assert client.get("/authUser/Me", cookies=_cookies("student-1")).json()["Firstname"] == "เก่า"
 
-    resp = client.patch("/settingProfile/UpdateProfileName",
+    resp = client.put("/settingProfile/UpdateProfileName",
                         json={"Prefix": "นาย", "Firstname": "ใหม่", "Lastname": "ชื่อ"}, cookies=_cookies("student-1"))
     assert resp.status_code == 200
 

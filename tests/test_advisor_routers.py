@@ -151,7 +151,7 @@ def test_complete_queue_success(mqa_client, mongo_client):
     _seed_user(mongo_client, "advisor-1")
     _insert_booking(mongo_client, AdvisorId="advisor-1", Status="InProgress")
 
-    resp = mqa_client.patch("/CompleteQueue", json={"user_id": "student-1"}, cookies=_cookies("advisor-1"))
+    resp = mqa_client.put("/CompleteQueue", json={"user_id": "student-1"}, cookies=_cookies("advisor-1"))
 
     assert resp.status_code == 200
     booking = mongo_client["BORC"]["BookingOnline"].find_one({"UserId": "student-1"})
@@ -161,7 +161,7 @@ def test_complete_queue_success(mqa_client, mongo_client):
 def test_complete_queue_404_when_no_matching_booking(mqa_client, mongo_client):
     _seed_user(mongo_client, "advisor-1")
 
-    resp = mqa_client.patch("/CompleteQueue", json={"user_id": "no-such-student"}, cookies=_cookies("advisor-1"))
+    resp = mqa_client.put("/CompleteQueue", json={"user_id": "no-such-student"}, cookies=_cookies("advisor-1"))
 
     assert resp.status_code == 404
 

@@ -140,8 +140,8 @@ def update_UserImageDB(user_id: str, image_url: str) -> bool:
 
 # ─── Routes ───────────────────────────────────────────────────────────────────
 
-# ✅ PATCH /UpdateProfileName
-@router.patch("/UpdateProfileName")
+# ✅ PUT /UpdateProfileName
+@router.put("/UpdateProfileName")
 def update_profile_name(
     data    : UpdateProfileName,
     payload : dict = Depends(verify_user_token)
@@ -170,10 +170,10 @@ def update_profile_name(
     }
 
 
-# ✅ PATCH /UpdateProfileImage
+# ✅ PUT /UpdateProfileImage
 # def ธรรมดา (ไม่ใช่ async): cloudinary.uploader.upload เป็นการเรียกเครือข่ายแบบ blocking — FastAPI จะรัน
 # ใน threadpool แทนที่จะบล็อก event loop ของทุก request (รวม WebSocket แชท) ตลอดการอัปโหลด
-@router.patch("/UpdateProfileImage")
+@router.put("/UpdateProfileImage")
 def update_profile_image(
     file    : UploadFile = File(...),
     payload : dict       = Depends(verify_user_token)

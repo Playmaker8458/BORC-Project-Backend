@@ -1,7 +1,7 @@
 import logging
 
 logger = logging.getLogger(__name__)
-from fastapi import APIRouter, Depends, HTTPException, Request, status, Response
+from fastapi import APIRouter, Depends, HTTPException, Request, status, Response, BackgroundTasks
 from pydantic import BaseModel, StrictInt, field_validator
 from typing import Optional
 from pymongo.errors import DuplicateKeyError
@@ -15,7 +15,12 @@ from common.rate_limit import limit
 from common.url_safety import UnsafeUrl, validate_https_url
 from users.auth.authUser import verify_pending_or_active_user, set_user_session, SESSION_MAX_AGE
 
+from common.notify import CHATBOT_INTERNAL_HEADERS, CHATBOT_URL, notify_chatbot
+
+
 router = APIRouter()
+
+chatbot_uri = CHATBOT_URL
 
 COOKIE_NAME = "access_token"
 IS_PROD = os.getenv("ENV") == "production"
@@ -184,7 +189,8 @@ async def AddDataProfile(
     request: Request,
     data: DataProfile,
     response: Response,
-    session: dict = Depends(verify_pending_or_active_user),
+    background_tasks: BackgroundTasks,
+    session: dict = Depends(verify_pending_or_active_user)
 ):
     if session.get("user_id") != data.userID:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="session สำหรับลงทะเบียนไม่ถูกต้อง")
@@ -213,6 +219,16 @@ async def AddDataProfile(
             "Status"    : "Pending",
             "imageURL"  : data.imageURL,
         }
+
+        background_tasks.add_task(
+            notify_chatbot,
+            f"{chatbot_uri}/ApprovedUser/login",
+            {
+                "userId" : data.userID,
+                "Role" : "Pending"
+            },
+            CHATBOT_INTERNAL_HEADERS
+        )
 
         # ใช้ SESSION_MAX_AGE เดียวกับ cookie (authUser.set_user_session) — เดิม JWT
         # ในนี้อายุ 7 วันแต่ cookie ถูกลบไปแล้วตั้งแต่วันที่ 1 (max_age=SESSION_MAX_AGE)

@@ -152,7 +152,7 @@ def _bearer(token):
 
 
 def _change(client, token, current=PW, new="An0therLongSecret!", confirm=None):
-    return client.patch("/settingAdmin/ChangePassword", headers=_bearer(token), json={
+    return client.put("/settingAdmin/ChangePassword", headers=_bearer(token), json={
         "current_password": current, "new_password": new, "confirm_password": new if confirm is None else confirm})
 
 

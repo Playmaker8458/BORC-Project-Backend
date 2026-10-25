@@ -55,8 +55,8 @@ def update_AdminPasswordDB(user_id: str, hashed_password: str) -> bool:
 
 
 # ─── Routes ───────────────────────────────────────────────────────────────────
-# ✅ PATCH /ChangePassword
-@router.patch("/ChangePassword")
+# ✅ PUT /ChangePassword
+@router.put("/ChangePassword")
 def change_password(
     data    : ChangePassword,
     request : Request,

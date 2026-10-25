@@ -341,8 +341,8 @@ def advisor_cancel_queue(request: Request, body: CancelBody, background_tasks: B
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
-# ─── PATCH /CompleteQueue ───────────────────────────────────────────────────
-@router.patch("/CompleteQueue")
+# ─── PUT /CompleteQueue ───────────────────────────────────────────────────
+@router.put("/CompleteQueue")
 def complete_queue(request: Request, body: CompleteBody):
     """ให้อาจารย์ปิดการให้คำปรึกษาด้วยตนเอง และปลด slot ทันที."""
     try:

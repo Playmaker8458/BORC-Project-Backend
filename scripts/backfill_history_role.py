@@ -1,7 +1,7 @@
 """
 One-off migration: backfill missing `role` on old AccountManagementHistory
 records written by the PATCH /GETAdmin/Profile/{user_id} bug (fixed in
-Admin/router/GetProfileUser.py) where every "ยืนยันสิทธิ์แล้ว"/"แก้ไขบัญชีแล้ว"
+Admin/router/LoginVerification.py) where every "ยืนยันสิทธิ์แล้ว"/"แก้ไขบัญชีแล้ว"
 record was saved with role="" instead of the role Admin actually picked.
 
 AccountManagementHistory does NOT store userId (only firstName/lastName), so

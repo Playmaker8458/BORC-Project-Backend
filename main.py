@@ -17,10 +17,10 @@ load_dotenv(override=True)
 
 
 from Admin.auth.authAdmin import router as auth_router_Admin, require_admin, require_permission
-from Admin.router.AdminAccounts import router as AdminAccounts_router
-from Admin.router.GetProfileUser import router as GetProfile_router
+from Admin.router.AddAdmin import router as AddAdmin_router
+from Admin.router.LoginVerification import router as LoginVerification_router
 from Admin.router.ManagementAccount import router as ManagementAccount_router
-from Admin.router.GetHistoryAccount import router as GetHistoryAccount_router
+from Admin.router.AccountManagementHistory import router as AccountManagementHistory_router
 from Admin.router.SettingAdmin import router as SettingAdmin_router
 from Admin.router.CountUser import router as CountUser_router
 
@@ -195,10 +195,10 @@ app.include_router(auth_router_Admin, prefix="/authAdmin", tags=["LoginAdmin"])
 admin_dependencies = [Depends(require_admin)]
 # สิทธิ์รายหน้า: verify=ยืนยันการเข้าสู่ระบบ, manage=จัดการบัญชี, history=ประวัติ, add=เพิ่มบัญชีผู้ดูแลระบบ
 # (หน้าหลัก/ตั้งค่า ใช้ได้ทุกแอดมิน) — require_permission ครอบ require_admin ไว้แล้ว
-app.include_router(GetProfile_router, prefix="/GETAdmin", tags=["Admin"], dependencies=[Depends(require_permission("verify"))])
-app.include_router(ManagementAccount_router, prefix="/ManagementAccount",tags=["Admin"], dependencies=[Depends(require_permission("manage"))])
-app.include_router(GetHistoryAccount_router, prefix="/HistoryAccount", tags=["Admin"], dependencies=[Depends(require_permission("history"))])
-app.include_router(AdminAccounts_router, prefix="/AdminAccounts", tags=["Admin"], dependencies=[Depends(require_permission("add"))])
+app.include_router(LoginVerification_router, prefix="/GETAdmin", tags=["Admin"], dependencies=[Depends(require_permission("verify"))])
+app.include_router(ManagementAccount_router, prefix="/ManagementAccount", tags=["Admin"], dependencies=admin_dependencies)  # สิทธิ์ manage/add ผูกรายเส้นทางในไฟล์
+app.include_router(AccountManagementHistory_router, prefix="/HistoryAccount", tags=["Admin"], dependencies=[Depends(require_permission("history"))])
+app.include_router(AddAdmin_router, prefix="/AdminAccounts", tags=["Admin"], dependencies=[Depends(require_permission("add"))])
 app.include_router(SettingAdmin_router, prefix="/settingAdmin", tags=["Admin"], dependencies=admin_dependencies)
 app.include_router(CountUser_router, prefix="/Count", tags=["Admin"], dependencies=admin_dependencies)
 
@@ -229,22 +229,6 @@ app.include_router(QueuehistoryAdvisor_router ,prefix="/QueuehistoryAdvisor", ta
 app.include_router(ChatbotKnowledge_router, prefix="/advisor-chatbot", tags=["Advisor"], dependencies=advisor_dependencies)
 
 # แชท
-# หมายเหตุ: handler แต่ละตัวใน router เหล่านี้เรียก verify_user_token/ensure_user_role
-# (REST) หรือ get_current_user_ws/ensure_user_role (WebSocket) เองอยู่แล้วทุกตัว
-# ⚠️ ห้ามใส่ dependencies=[Depends(require_student/require_advisor)] ที่ระดับ router ตรงนี้:
-# require_* ไปเรียก verify_user_token(request: Request) ต่อ ซึ่ง FastAPI resolve ไม่ได้ใน
-# WebSocket scope (ไม่มี Request object) ทำให้ WS route พังด้วย 500 ทันทีที่ handshake
-# (เคย regression มาแล้ว — ดู tests/test_chat_routers.py สำหรับเทสต์ยืนยันพฤติกรรมนี้)
-#
-# ⚠️ ลำดับการ include_router มีผลจริง: ทั้งสอง router อยู่ภายใต้ prefix "/Message"
-# เดียวกัน และ Starlette จะจับคู่ route ตามลำดับที่ถูก include ก่อน-หลัง
-# GET /chat/history/{student_id} (advisor, path param) กับ GET /chat/history/mine
-# (student, literal) มีจำนวน segment เท่ากัน — ถ้า advisor router ถูก include ก่อน
-# request "/Message/chat/history/mine" จะไปแมตช์กับ advisor route ก่อนเสมอ
-# (student_id="mine") แล้วโดน ensure_user_role(payload, "Advisor") ปฏิเสธด้วย 403
-# ทำให้ student ไม่มีทางเรียกประวัติแชทของตัวเองได้เลย (regression จริงที่เจอจากการ
-# ทดสอบผ่านหน้าเว็บจริง) จึงต้อง include ChatStudent_router (literal path) ก่อน
-# DataApproved_router (path-param) เสมอ — ห้ามสลับลำดับ
 app.include_router(ChatStudent_router, prefix="/Message", tags=["ChatStudent"])
 app.include_router(DataApproved_router, prefix="/Message", tags=["ChatAdvisor"])
 
