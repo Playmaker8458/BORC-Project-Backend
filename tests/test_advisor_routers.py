@@ -686,8 +686,8 @@ def test_save_day_schedule_closes_unbooked_slots(ca_client, mongo_client):
     doc = mongo_client["BORC"]["ManageTimeSlots"].find_one({"advisorId": "advisor-1"})
     assert doc["dates"]["2099-01-01"][0]["is_closed"] is True
 
-    av_doc = mongo_client["BORC"]["ConsultationAvailability"].find_one({"advisorId": "advisor-1", "date": "2099-01-01"})
-    assert av_doc["slots"][0]["is_closed"] is True
+    # สถานะเปิด-ปิดเก็บใน ManageTimeSlots ที่เดียว ไม่เขียนสำเนาลง ConsultationAvailability
+    assert mongo_client["BORC"]["ConsultationAvailability"].count_documents({}) == 0
 
 
 def test_save_day_schedule_404_when_no_slots_for_date(ca_client, mongo_client):

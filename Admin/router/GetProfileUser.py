@@ -2,10 +2,11 @@ import logging
 import re
 
 logger = logging.getLogger(__name__)
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from datetime import datetime, timezone
 from Admin.Database.ConnectDB import Connect_MongoDB
+from Admin.auth.authAdmin import verify_token
 from common.user_cache import invalidate_user_cache
 from dotenv import load_dotenv
 from typing import Literal
@@ -50,6 +51,15 @@ _AWAITING_VERIFICATION = {"$and": [
 ]}
 
 
+# สิทธิ์ "ยืนยันการเข้าสู่ระบบ" (verify) อนุมัติได้เฉพาะบัญชีที่รอยืนยัน; การระงับ / เปลี่ยนสิทธิ์บัญชีที่อนุมัติแล้ว / ลบบัญชี
+# ต้องมีสิทธิ์ "จัดการบัญชี" (manage) ด้วย — ไม่งั้นแอดมินระดับล่างข้ามขอบเขตสิทธิ์ผ่าน endpoint นี้ได้
+NEEDS_MANAGE_DETAIL = "ต้องมีสิทธิ์จัดการบัญชี จึงจะแก้ไขหรือลบบัญชีที่ไม่ได้อยู่ในสถานะรอยืนยันได้"
+
+
+def _can_manage(payload: dict) -> bool:
+    return "manage" in payload["permissions"]
+
+
 @router.get("/Profile")
 def get_all_profiles(
     page: int = Query(1, ge=1),
@@ -75,7 +85,7 @@ def get_all_profiles(
 #  PATCH  /Profile/{user_id}  – ยืนยัน / แก้ไขสิทธิ์
 # ─────────────────────────────────────────
 @router.patch("/Profile/{user_id}")
-def update_role_user(user_id: str, update: UpdateDataUser):
+def update_role_user(user_id: str, update: UpdateDataUser, payload: dict = Depends(verify_token)):
     client = Connect_MongoDB()
     try:
         db          = client["BORC"]
@@ -86,19 +96,26 @@ def update_role_user(user_id: str, update: UpdateDataUser):
         if not user:
             raise HTTPException(status_code=404, detail=f"ไม่พบผู้ใช้งาน userId={user_id}")
 
+        can_manage = _can_manage(payload)
+        if not can_manage and update.Status != "Approved":
+            raise HTTPException(status_code=403, detail=NEEDS_MANAGE_DETAIL)
+
         status_label_map = {
             "Approved": "ยืนยันสิทธิ์แล้ว",
             "Edited":   "แก้ไขบัญชีแล้ว",
         }
         status_label = status_label_map.get(update.Status, "แก้ไขบัญชีแล้ว")
 
-        col.update_one(
-            {"userId": user_id},
+        target = {"userId": user_id} if can_manage else {"$and": [{"userId": user_id}, *_AWAITING_VERIFICATION["$and"]]}
+        result = col.update_one(
+            target,
             {"$set": {
                 "Role":   update.Role,
                 "Status": update.Status,
             }}
         )
+        if result.matched_count == 0 and not can_manage:
+            raise HTTPException(status_code=403, detail=NEEDS_MANAGE_DETAIL)
         invalidate_user_cache(user_id)  # สิทธิ์/สถานะใหม่ต้องมีผลทันที ไม่รอ cache หมดอายุ
             
         save_history(
@@ -132,11 +149,15 @@ def update_role_user(user_id: str, update: UpdateDataUser):
 #  DELETE  /Profile/{user_id}  – ลบบัญชี
 # ─────────────────────────────────────────
 @router.delete("/Profile/{user_id}")
-def delete_user(user_id: str):
+def delete_user(user_id: str, payload: dict = Depends(verify_token)):
     """
     - ลบ document ใน UserProfile
     - บันทึก history ด้วย statusLabel: "ลบบัญชีแล้ว"
+    ต้องมีสิทธิ์ manage (หน้าเว็บไม่ได้เรียก endpoint นี้ — การลบบัญชีใช้ /ManagementAccount/DeleteAccountUser)
     """
+    if not _can_manage(payload):
+        raise HTTPException(status_code=403, detail=NEEDS_MANAGE_DETAIL)
+
     client = Connect_MongoDB()
     try:
         db          = client["BORC"]

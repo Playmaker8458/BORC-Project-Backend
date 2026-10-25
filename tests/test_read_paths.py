@@ -194,12 +194,14 @@ def test_advisor_stats_rejects_student(sc_client, mongo_client):
 def auth_env(mongo_client, monkeypatch):
     from users.auth import authUser
     from users.router import SettingProfile
+    from Admin.auth import authAdmin
     from Admin.router import GetProfileUser, ManagementAccount
 
     monkeypatch.setattr(authUser, "Connect_MongoDB", lambda: mongo_client)
     monkeypatch.setattr(SettingProfile, "Connect_MongoDB", lambda: mongo_client)
     monkeypatch.setattr(GetProfileUser, "Connect_MongoDB", lambda: mongo_client)
     monkeypatch.setattr(ManagementAccount, "Connect_MongoDB", lambda: mongo_client)
+    monkeypatch.setattr(authAdmin, "Connect_MongoDB", lambda: mongo_client)
 
     app = FastAPI()
     app.include_router(authUser.router, prefix="/authUser")
@@ -207,6 +209,12 @@ def auth_env(mongo_client, monkeypatch):
     app.include_router(GetProfileUser.router)
     app.include_router(ManagementAccount.router)
     return TestClient(app), mongo_client
+
+
+def _full_admin(mongo):
+    """header ของแอดมินสิทธิ์เต็ม (ไม่มีฟิลด์ Permissions เหมือนแอดมินเดิม) สำหรับ endpoint /Profile ที่ต้องรู้ตัวผู้เรียก"""
+    from tests.test_admin_verify_boundary import admin_headers
+    return admin_headers(mongo, None)
 
 
 def test_me_returns_exact_profile(auth_env):
@@ -345,7 +353,7 @@ def test_admin_suspend_takes_effect_immediately_despite_cache(auth_env):
     _seed_user(mongo, "student-1")
     assert client.get("/authUser/Me", cookies=_cookies("student-1")).status_code == 200  # อุ่น cache
 
-    resp = client.patch("/Profile/student-1", json={"Role": "Student", "Status": "Suspended"})
+    resp = client.patch("/Profile/student-1", json={"Role": "Student", "Status": "Suspended"}, headers=_full_admin(mongo))
     assert resp.status_code == 200
 
     assert client.get("/authUser/Me", cookies=_cookies("student-1")).status_code == 403
@@ -356,7 +364,7 @@ def test_admin_delete_profile_takes_effect_immediately(auth_env):
     _seed_user(mongo, "student-1")
     assert client.get("/authUser/Me", cookies=_cookies("student-1")).status_code == 200
 
-    resp = client.delete("/Profile/student-1")
+    resp = client.delete("/Profile/student-1", headers=_full_admin(mongo))
     assert resp.status_code == 200
 
     assert client.get("/authUser/Me", cookies=_cookies("student-1")).status_code == 401
@@ -370,7 +378,7 @@ def test_admin_update_account_takes_effect_immediately(auth_env):
 
     resp = client.put("/UpdateAccountUser", json={
         "id": oid, "Prefix": "นาง", "Firstname": "ใหม่", "Lastname": "ชื่อ", "Role": "Student",
-        "Status": "Suspended", "Faculty": "", "Department": "",
+        "Status": "Suspended", "Faculty": "", "Department": "", "YearLevel": "1",
     })
     assert resp.status_code == 200
 

@@ -16,6 +16,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 # copy โค้ดทั้งหมดเข้า container
 COPY . .
 
+# รันแอปด้วยผู้ใช้ธรรมดาแทน root: ถ้าแอปถูกเจาะ ผู้โจมตีจะได้สิทธิ์จำกัด (โค้ดไม่เขียนไฟล์ลงดิสก์ จึงไม่ต้องมีสิทธิ์เขียน /app)
+RUN useradd --system --no-create-home --uid 10001 appuser
+USER appuser
+
 EXPOSE 8000
 
 # รัน AddLoginData.py ก่อน (เช่น seed ข้อมูล admin login เข้า DB)

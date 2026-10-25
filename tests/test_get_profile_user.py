@@ -12,20 +12,26 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from Admin.auth import authAdmin
 from Admin.router import GetProfileUser
+from tests.test_admin_verify_boundary import admin_headers
 
 
 @pytest.fixture
 def app(mongo_client, monkeypatch):
     monkeypatch.setattr(GetProfileUser, "Connect_MongoDB", lambda: mongo_client)
+    monkeypatch.setattr(authAdmin, "Connect_MongoDB", lambda: mongo_client)
     app = FastAPI()
     app.include_router(GetProfileUser.router)
     return app
 
 
 @pytest.fixture
-def client(app):
-    return TestClient(app)
+def client(app, mongo_client):
+    # แอดมินสิทธิ์เต็ม (ไม่มีฟิลด์ Permissions เหมือนแอดมินเดิม): เทสต์นี้ตรวจการบันทึก history ไม่ใช่เรื่องสิทธิ์
+    test_client = TestClient(app)
+    test_client.headers.update(admin_headers(mongo_client, None))
+    return test_client
 
 
 def test_approve_pending_user_saves_new_role_to_history(client, mongo_client):

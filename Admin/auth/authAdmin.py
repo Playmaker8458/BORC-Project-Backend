@@ -55,6 +55,19 @@ INVALID_CREDENTIALS_DETAIL = "อีเมลหรือรหัสผ่า�
 MAX_PASSWORD_BYTES = 72  # ขีดจำกัดของ bcrypt
 
 
+# สิทธิ์รายหน้าของแอดมิน เก็บเป็นลิสต์ในฟิลด์ Permissions ของ LoginAdmin
+#   verify=ยืนยันการเข้าสู่ระบบ, manage=จัดการบัญชี, history=ประวัติจัดการบัญชี, add=เพิ่มบัญชีผู้ดูแลระบบ
+ADMIN_PERMISSIONS = ("verify", "manage", "history", "add")
+
+
+def get_admin_permissions(admin: dict) -> list[str]:
+    """แอดมินเดิมที่ไม่มีฟิลด์ Permissions ได้ทุกสิทธิ์ (ไม่ให้ระบบเดิมพัง); ค่าที่ไม่รู้จักถูกตัดทิ้ง"""
+    granted = admin.get("Permissions")
+    if granted is None:
+        return list(ADMIN_PERMISSIONS)
+    return [p for p in ADMIN_PERMISSIONS if p in granted]
+
+
 def _to_epoch(value: datetime) -> float:
     """MongoDB คืน datetime แบบไม่มี timezone (UTC) ถ้าไม่ได้ตั้ง tz_aware"""
     if value.tzinfo is None:
@@ -107,7 +120,10 @@ def verify_token(request: Request, bearer: str | None = Depends(oauth2_scheme)):
                     detail="Token หมดอายุเนื่องจากมีการเปลี่ยนรหัสผ่าน กรุณาเข้าสู่ระบบใหม่",
                 )
 
-        return {"email": email, "user_id": user_id, "role": role, "FullName" : fullName}
+        return {
+            "email": email, "user_id": user_id, "role": role, "FullName" : fullName,
+            "permissions": get_admin_permissions(admin),
+        }
 
     except HTTPException:
         raise
@@ -119,6 +135,15 @@ def require_admin(payload: dict = Depends(verify_token)):
     if payload.get("role") != "Admin":
         raise HTTPException(status_code=403, detail="หน้านี้สำหรับผู้ดูแลระบบเท่านั้น")
     return payload
+
+
+def require_permission(permission: str):
+    """dependency สำหรับ router/endpoint ที่ต้องมีสิทธิ์รายหน้า (ต่อจาก require_admin)"""
+    def checker(payload: dict = Depends(require_admin)):
+        if permission not in payload["permissions"]:
+            raise HTTPException(status_code=403, detail="บัญชีนี้ไม่มีสิทธิ์ใช้งานส่วนนี้")
+        return payload
+    return checker
 
 
 def getAdminDB(data: str) -> dict | None:
@@ -193,7 +218,8 @@ def get_me(payload: dict = Depends(verify_token)):
     return {
         "FullName": payload["FullName"],
         "user_id" : payload["user_id"],
-        "role"    : payload["role"]
+        "role"    : payload["role"],
+        "permissions": payload["permissions"],
     }
 
 

@@ -209,3 +209,41 @@ def test_add_data_profile_rejects_unknown_consent_version(client, mongo_client):
 
     assert client.post("/SetupProfile/AddDataProfile", json=payload).status_code == 422
     assert mongo_client["BORC"]["UserProfile"].find_one({"userId": "line-uid-badver"}) is None
+
+
+# ── ชั้นปี (yearLevel) ────────────────────────────────────────────────────────
+# ในฐานข้อมูลเก็บเป็นข้อความ "1"-"4" ตามที่เลือกในหน้า ProfileSetup และ "" เมื่อไม่ระบุ (รูปแบบเดียวกับเอกสารเดิมใน Atlas)
+
+@pytest.mark.parametrize("sent", ["1", "2", "3", "4", 1, 2, 3, 4])
+def test_add_data_profile_stores_year_level_as_text(client, mongo_client, sent):
+    """รับได้ทั้งข้อความที่หน้าเว็บส่ง ("2") และตัวเลข (2) แต่เก็บเป็นข้อความเสมอ"""
+    client.cookies.set(COOKIE_NAME, _registration_cookie("line-uid-year"))
+    resp = client.post("/SetupProfile/AddDataProfile", json={**VALID_PAYLOAD, "userID": "line-uid-year", "yearLevel": sent})
+    assert resp.status_code == 200
+    saved = mongo_client["BORC"]["UserProfile"].find_one({"userId": "line-uid-year"})
+    assert saved["YearLevel"] == str(sent) and isinstance(saved["YearLevel"], str)
+
+
+@pytest.mark.parametrize("extra", [{}, {"yearLevel": None}, {"yearLevel": ""}])
+def test_add_data_profile_without_year_level_stores_empty_text(client, mongo_client, extra):
+    """อาจารย์ไม่มีชั้นปี และ client รุ่นเก่าไม่ส่ง field นี้ — ต้องสมัครได้ โดยเก็บเป็น "" (เหมือน Role ที่ว่างตอนสมัคร)"""
+    client.cookies.set(COOKIE_NAME, _registration_cookie("line-uid-new"))
+    resp = client.post("/SetupProfile/AddDataProfile", json={**VALID_PAYLOAD, **extra})
+    assert resp.status_code == 200
+    assert mongo_client["BORC"]["UserProfile"].find_one({"userId": "line-uid-new"})["YearLevel"] == ""
+
+
+def test_year_level_field_sits_right_after_status(client, mongo_client):
+    """ลำดับฟิลด์ตามเอกสารเดิมใน Atlas: ... Role, Status, YearLevel, Faculty, Department ..."""
+    client.cookies.set(COOKIE_NAME, _registration_cookie("line-uid-new"))
+    assert client.post("/SetupProfile/AddDataProfile", json=VALID_PAYLOAD).status_code == 200
+    keys = list(mongo_client["BORC"]["UserProfile"].find_one({"userId": "line-uid-new"}).keys())
+    assert keys[keys.index("Status") + 1:keys.index("Status") + 4] == ["YearLevel", "Faculty", "Department"]
+
+
+@pytest.mark.parametrize("bad", [0, 5, -1, 2.5, "abc", "0", "5", "1.5", " ", True])
+def test_add_data_profile_rejects_invalid_year_level(client, mongo_client, bad):
+    client.cookies.set(COOKIE_NAME, _registration_cookie("line-uid-new"))
+    resp = client.post("/SetupProfile/AddDataProfile", json={**VALID_PAYLOAD, "yearLevel": bad})
+    assert resp.status_code == 422
+    assert mongo_client["BORC"]["UserProfile"].count_documents({}) == 0

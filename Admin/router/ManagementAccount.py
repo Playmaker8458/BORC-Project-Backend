@@ -9,11 +9,12 @@ from common.user_cache import invalidate_user_cache
 from common.attachments import delete_attachments
 from common.notify import CHATBOT_INTERNAL_HEADERS, CHATBOT_URL, notify_chatbot
 from common.booking_status import ACTIVE_STATUSES
+from common.year_level import YEAR_LEVELS, parse_year_level, year_level_for_storage
 from common.slot_service import recalculate_slot_booked, split_time_range
 from bson import ObjectId
-from pydantic import BaseModel
+from pydantic import BaseModel, StrictInt, field_validator
 from datetime import datetime, timezone
-from typing import Literal
+from typing import Literal, Optional
 
 router = APIRouter()
 
@@ -26,6 +27,19 @@ class UpdateUserRequest(BaseModel):
     Status: Literal["Approved", "Pending", "Suspended"]
     Faculty: str = ""     
     Department: str = ""  
+    # ชั้นปี "1"-"4" (รับทั้งข้อความและตัวเลข) — ใช้กับนักศึกษา: ไม่ส่งมา = คงค่าเดิมที่เก็บไว้, ส่งมาแล้วใช้ค่าที่ส่ง
+    # อาจารย์ไม่มีชั้นปี (backend ล้างเป็น "" เสมอ); ค่าที่ไม่ใช่ 1-4 (เช่น "abc", 9) → 422
+    YearLevel: Optional[StrictInt | str] = None
+
+    @field_validator("YearLevel", mode="after")
+    @classmethod
+    def _year_level_must_be_offered(cls, value):
+        if value is None or value == "":
+            return None
+        parsed = parse_year_level(value)
+        if parsed is None:
+            raise ValueError("ชั้นปีต้องเป็น 1 ถึง %d" % max(YEAR_LEVELS))
+        return parsed
 
 class DeleteUserRequest(BaseModel):
     id: str
@@ -213,6 +227,18 @@ def Delete_AccountUser(client, user_id: str):
         raise HTTPException(status_code=400, detail=f"ไม่รองรับ Role: {role}")
 
 
+def _year_level_to_store(body: UpdateUserRequest, user: dict) -> str:
+    """ชั้นปีที่จะเก็บลง UserProfile: อาจารย์ = "" (ล้างชั้นปีเดิมเมื่อเปลี่ยนจากนักศึกษา);
+    นักศึกษา ต้องมีชั้นปีที่ถูกต้อง — ใช้ค่าที่ส่งมา หรือค่าที่เก็บไว้เดิมถ้าไม่ได้ส่ง (เช่น อาจารย์เปลี่ยนเป็นนักศึกษาต้องระบุเอง)"""
+    if body.Role == "Advisor":
+        return year_level_for_storage(None)
+    source = body.YearLevel if "YearLevel" in body.model_fields_set else user.get("YearLevel")
+    year_level = parse_year_level(source)
+    if year_level is None:
+        raise HTTPException(status_code=400, detail="กรุณาระบุชั้นปีของนักศึกษา (1-%d)" % max(YEAR_LEVELS))
+    return year_level_for_storage(year_level)
+
+
 def Update_AccountUser(client, body: UpdateUserRequest):
     db          = client["BORC"]
     col_profile = db["UserProfile"]
@@ -228,6 +254,8 @@ def Update_AccountUser(client, body: UpdateUserRequest):
     user = col_profile.find_one({"_id": object_id})
     if not user:
         raise HTTPException(status_code=404, detail="ไม่พบบัญชีผู้ใช้นี้ในระบบ")
+
+    year_to_store = _year_level_to_store(body, user)  # ตรวจก่อนเขียนอะไรลงฐานข้อมูล
 
     old_prefix    = user.get("Prefix",    "")
     old_firstname = user.get("Firstname", "")
@@ -247,6 +275,7 @@ def Update_AccountUser(client, body: UpdateUserRequest):
             "Status"   : body.Status,
             "Faculty"   : body.Faculty, 
             "Department": body.Department,  
+            "YearLevel" : year_to_store,
         }}
     )
 

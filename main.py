@@ -16,7 +16,8 @@ from common.auth_errors import register_auth_error_handlers
 load_dotenv(override=True)
 
 
-from Admin.auth.authAdmin import router as auth_router_Admin, require_admin
+from Admin.auth.authAdmin import router as auth_router_Admin, require_admin, require_permission
+from Admin.router.AdminAccounts import router as AdminAccounts_router
 from Admin.router.GetProfileUser import router as GetProfile_router
 from Admin.router.ManagementAccount import router as ManagementAccount_router
 from Admin.router.GetHistoryAccount import router as GetHistoryAccount_router
@@ -192,9 +193,12 @@ app.add_middleware(
 # Admin
 app.include_router(auth_router_Admin, prefix="/authAdmin", tags=["LoginAdmin"])
 admin_dependencies = [Depends(require_admin)]
-app.include_router(GetProfile_router, prefix="/GETAdmin", tags=["Admin"], dependencies=admin_dependencies)
-app.include_router(ManagementAccount_router, prefix="/ManagementAccount",tags=["Admin"], dependencies=admin_dependencies)
-app.include_router(GetHistoryAccount_router, prefix="/HistoryAccount", tags=["Admin"], dependencies=admin_dependencies)
+# สิทธิ์รายหน้า: verify=ยืนยันการเข้าสู่ระบบ, manage=จัดการบัญชี, history=ประวัติ, add=เพิ่มบัญชีผู้ดูแลระบบ
+# (หน้าหลัก/ตั้งค่า ใช้ได้ทุกแอดมิน) — require_permission ครอบ require_admin ไว้แล้ว
+app.include_router(GetProfile_router, prefix="/GETAdmin", tags=["Admin"], dependencies=[Depends(require_permission("verify"))])
+app.include_router(ManagementAccount_router, prefix="/ManagementAccount",tags=["Admin"], dependencies=[Depends(require_permission("manage"))])
+app.include_router(GetHistoryAccount_router, prefix="/HistoryAccount", tags=["Admin"], dependencies=[Depends(require_permission("history"))])
+app.include_router(AdminAccounts_router, prefix="/AdminAccounts", tags=["Admin"], dependencies=[Depends(require_permission("add"))])
 app.include_router(SettingAdmin_router, prefix="/settingAdmin", tags=["Admin"], dependencies=admin_dependencies)
 app.include_router(CountUser_router, prefix="/Count", tags=["Admin"], dependencies=admin_dependencies)
 

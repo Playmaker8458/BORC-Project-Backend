@@ -1,8 +1,9 @@
+import asyncio
 import logging
 
 logger = logging.getLogger(__name__)
 import os
-from typing import Annotated
+from typing import Annotated, Optional
 from datetime import datetime, timezone
 
 import certifi
@@ -10,7 +11,7 @@ import httpx
 from pymongo import AsyncMongoClient
 from pymongo.server_api import ServerApi
 from dotenv import load_dotenv
-from pydantic import BaseModel
+from pydantic import BaseModel, StrictInt, field_validator
 from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketDisconnect, Depends
 from fastapi.exceptions import WebSocketException
 from starlette import status as ws_status
@@ -18,10 +19,11 @@ from starlette import status as ws_status
 from users.auth.authUser import ensure_user_role, verify_user_token, verify_ws_ticket, get_user_id
 from common.url_safety import UnsafeUrl, validate_https_url
 from common.timefmt import to_thai_iso
-from common.booking_status import CHAT_STATUSES
+from common.booking_status import CHAT_STATUSES, COMPLETABLE_STATUSES
 from common.chat_limits import ChatInvalid, check_rest_text, chat_rate_ok, parse_ws_text, retry_after_seconds, WS_POLICY_VIOLATION
 
 from common.notify import CHATBOT_INTERNAL_HEADERS, CHATBOT_URL
+from common.year_level import YEAR_LEVELS, parse_year_level
 from common.chat_unread import get_advisor_unread_counts, mark_chat_read
 
 load_dotenv(override=True)
@@ -53,6 +55,30 @@ class ChatMessageBody(BaseModel):
 class ChatAppointmentBody(BaseModel):
     student_id: str
     url: str
+
+
+class ChatBroadcastBody(BaseModel):
+    url: str
+    # None = นักศึกษาทุกคนในรายการ; 1-4 = เฉพาะนักศึกษาที่ระบุชั้นปีนั้น (UserProfile.YearLevel)
+    year_level: Optional[StrictInt] = None
+
+    @field_validator("year_level", mode="after")
+    @classmethod
+    def _year_level_must_be_offered(cls, value):
+        if value is not None and value not in YEAR_LEVELS:
+            raise ValueError("ชั้นปีต้องเป็น 1 ถึง %d" % max(YEAR_LEVELS))
+        return value
+
+
+# ผู้รับการส่งลิงก์กลุ่ม = คิวที่หน้า "คิวนัดหมายที่อนุมัติ" แสดงจริง คือ Approved และ InProgress เท่านั้น
+# (ตรงกับ CHATTABLE_STATUSES ฝั่ง frontend: src/lib/api/chat.ts) — ไม่รวม Pending (ยังไม่อนุมัติ), Rescheduled, Completed
+# ทั้งที่ CHAT_STATUSES (สิทธิ์แชท) กว้างกว่านั้น
+BROADCAST_STATUSES = COMPLETABLE_STATUSES  # ["Approved", "InProgress"]
+
+# จำนวนคิวสูงสุดที่รายการ "คิวนัดหมายที่อนุมัติ" แสดง — การส่งทั้งกลุ่มใช้ชุดเดียวกัน (= คนในรายการที่อาจารย์เห็น)
+APPROVED_QUEUE_LIMIT = 100
+# ส่งแจ้งเตือน LINE พร้อมกันได้กี่รายการ (ไม่ยิงทีเดียวหมดเพื่อไม่ถล่มบริการแชทบอท)
+LINE_PUSH_CONCURRENCY = 5
 
 
 async def ensure_advisor_has_student(advisor_id: str, student_id: str) -> None:
@@ -127,6 +153,72 @@ async def get_current_user_ws(websocket: WebSocket):
         raise WebSocketException(code=ws_status.WS_1008_POLICY_VIOLATION)
 
 
+async def _year_levels_of(student_ids) -> dict[str, int | None]:
+    ids = list({i for i in student_ids if i})
+    if not ids:
+        return {}
+    profiles = await db["UserProfile"].find(
+        {"userId": {"$in": ids}}, {"_id": 0, "userId": 1, "YearLevel": 1}
+    ).to_list(length=None)
+    # ในฐานข้อมูลเก็บเป็นข้อความ ("2") หรืออาจเป็นตัวเลข (แก้ด้วยมือ) — แปลงเป็นตัวเลขเสมอ; "" และค่าอื่น = ไม่ระบุ (None)
+    return {p["userId"]: parse_year_level(p.get("YearLevel")) for p in profiles}
+
+
+async def _broadcast_recipients(advisor_id: str, year_level: int | None) -> list[str]:
+    """นักศึกษาในรายการ "คิวนัดหมายที่อนุมัติ" ของอาจารย์ (ไม่ซ้ำคน เรียงตามวันนัด) — คำนวณที่ backend เสมอ ไม่รับรายชื่อจาก client
+    year_level ระบุ = เหลือเฉพาะคนที่มีชั้นปีนั้น"""
+    bookings = await db["BookingOnline"].find(
+        {"AdvisorId": advisor_id, "Status": {"$in": BROADCAST_STATUSES}}
+    ).sort("Date", 1).to_list(length=APPROVED_QUEUE_LIMIT)
+
+    student_ids = list(dict.fromkeys(b["UserId"] for b in bookings if b.get("UserId")))
+    
+    if year_level is None:
+        return student_ids
+    levels = await _year_levels_of(student_ids)
+    
+    return [s for s in student_ids if levels.get(s) == year_level]
+
+
+async def _store_link_messages(advisor_id: str, recipients: list[str], url: str, now: datetime) -> None:
+    """บันทึกลิงก์เป็นข้อความแชทชนิด link ในห้องของนักศึกษาแต่ละคน (คำสั่งเดียว)"""
+    await db["ChatMessages"].insert_many([
+        {"student_id": s, "advisor_id": advisor_id, "sender": "teacher", "type": "link", "text": url, "timestamp": now}
+        for s in recipients
+    ])
+
+
+async def _deliver_to_open_rooms(advisor_id: str, recipients: list[str], url: str, now: datetime) -> None:
+    """ส่งสดเข้าห้องแชทที่นักศึกษาเปิดอยู่ (ไล่ทีละห้อง)"""
+    live = {"sender": "teacher", "type": "link", "text": url, "timestamp": to_thai_iso(now)}
+    for s in recipients:
+        await room_broadcast(room_key(s, advisor_id), live)
+
+
+async def _push_line_link(http: httpx.AsyncClient, slots: asyncio.Semaphore, student_id: str, url: str) -> bool:
+    """แจ้งเตือน LINE ถึงนักศึกษาหนึ่งคนผ่านแชทบอท; คืน True เมื่อสำเร็จ (สถานะต่ำกว่า 400), False เมื่อล้มเหลว"""
+    async with slots:
+        try:
+            resp = await http.post(
+                SERVER_CHATBOT_URL,
+                json={"line_user_id": student_id, "url": url},
+                timeout=5.0,
+                headers=CHATBOT_INTERNAL_HEADERS,
+            )
+        except httpx.RequestError as exc:
+            logger.warning(f"[WARN] แจ้งเตือน LINE ไม่สำเร็จ ({student_id}): {exc}")
+            return False
+        return getattr(resp, "status_code", 200) < 400
+
+
+async def _notify_line_link(recipients: list[str], url: str) -> int:
+    """แจ้งเตือน LINE ทุกคนพร้อมกันไม่เกิน LINE_PUSH_CONCURRENCY รายการ; คืนจำนวนที่แจ้งไม่สำเร็จ"""
+    slots = asyncio.Semaphore(LINE_PUSH_CONCURRENCY)
+    async with httpx.AsyncClient() as http:
+        pushed = await asyncio.gather(*(_push_line_link(http, slots, s, url) for s in recipients))
+    return pushed.count(False)
+
+
 # ── REST: ของเดิม ──────────────────────────────────────────────────────────
 @router.get("/AdvisorApprovedQueue")
 async def get_advisor_queues_v2(request: Request):
@@ -137,10 +229,13 @@ async def get_advisor_queues_v2(request: Request):
 
         bookings = await db["BookingOnline"].find(
             {"AdvisorId": advisor_id, "Status": {"$in": CHAT_STATUSES}}
-        ).sort("Date", 1).to_list(length=100)
+        ).sort("Date", 1).to_list(length=APPROVED_QUEUE_LIMIT)
 
+        # ชั้นปีของนักศึกษา (ใช้กรอง/นับผู้รับในกล่องส่งลิงก์กลุ่ม); ไม่มีค่า (นักศึกษาเดิม) = None
+        year_levels = await _year_levels_of([b.get("UserId") for b in bookings])
         for b in bookings:
             b["_id"] = str(b["_id"])
+            b["YearLevel"] = year_levels.get(b.get("UserId"))
 
         return {"queues": bookings}
     except HTTPException:
@@ -284,6 +379,41 @@ async def send_chat_appointment(body: ChatAppointmentBody, request: Request):
     except HTTPException:
         raise
     except Exception as e:
+        logger.exception("Unhandled error")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.post("/chat/appointment/broadcast")
+async def broadcast_chat_appointment(body: ChatBroadcastBody, request: Request):
+    """ส่งลิงก์นัดหมายถึงนักศึกษาทุกคนในรายการคิวที่อนุมัติ (กรองตามชั้นปีได้) — เหมือนส่งเดี่ยวทุกขั้นตอน:
+    บันทึกเป็นข้อความแชทในห้องของแต่ละคน, ส่งสดเข้าห้องที่เปิดอยู่, แจ้งเตือน LINE"""
+    try:
+        payload = verify_user_token(request)
+        ensure_user_role(payload, "Advisor")
+        advisor_id = get_user_id(payload)
+        _enforce_rate_limit(advisor_id)
+        try:
+            url = validate_https_url(body.url, allowed_hosts=_allowed_link_hosts())
+        except UnsafeUrl as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+
+        recipients = await _broadcast_recipients(advisor_id, body.year_level)
+        if not recipients:
+            raise HTTPException(status_code=400, detail="ไม่มีนักศึกษาในรายการที่ตรงกับชั้นปีที่เลือก")
+
+        now = datetime.now(timezone.utc)
+        await _store_link_messages(advisor_id, recipients, url, now)
+        await _deliver_to_open_rooms(advisor_id, recipients, url, now)
+        line_failed = await _notify_line_link(recipients, url) # ส่งข้อมูลการแจ้งเตือนไปยังไลน์
+
+        return {
+            "message": "ส่งลิงก์นัดหมายสำเร็จ",
+            "total": len(recipients),
+            "line_failed": line_failed,
+        }
+    except HTTPException:
+        raise
+    except Exception:
         logger.exception("Unhandled error")
         raise HTTPException(status_code=500, detail="Internal server error")
 

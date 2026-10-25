@@ -69,6 +69,9 @@ class _AsyncCollection:
     async def insert_one(self, doc):
         return self._col.insert_one(doc)
 
+    async def insert_many(self, docs):
+        return self._col.insert_many(docs)
+
 
 class _AsyncDB:
     def __init__(self, sync_db):

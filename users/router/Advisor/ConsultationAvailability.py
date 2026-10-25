@@ -113,7 +113,6 @@ def save_day_schedule(body: SaveScheduleBody, request: Request):
 
         db     = Connect_MongoDB()["BORC"]
         ts_col = db["ManageTimeSlots"]
-        av_col = db["ConsultationAvailability"]
 
         # ✅ ค้นหา document ที่มี dates.{body.date} อยู่จริง (scan ทุก doc ของ advisor)
         target_doc = None
@@ -181,32 +180,6 @@ def save_day_schedule(body: SaveScheduleBody, request: Request):
                 status_code=409,
                 detail="ช่วงเวลามีการเปลี่ยนแปลงพร้อมกัน (เช่น มีนักศึกษาจอง) กรุณาลองใหม่อีกครั้ง",
             )
-
-        # ── บันทึกลง ConsultationAvailability ────────────────────────────────
-        av_slots = []
-        for s in updated_ts_slots:
-            av_slots.append({
-                "start"    : s["start"],
-                "end"      : s["end"],
-                "label"    : s.get("label", ""),
-                "is_closed": s.get("is_closed", False),
-                "isLocked" : s.get("isLocked", False),
-                "booked"   : s.get("booked", 0),
-            })
-
-        av_col.update_one(
-            {"advisorId": advisor_id, "date": body.date},
-            {
-                "$set": {
-                    "advisorId" : advisor_id,
-                    "date"      : body.date,
-                    "slots"     : av_slots,
-                    "updatedAt" : now,
-                },
-                "$setOnInsert": {"createdAt": now},
-            },
-            upsert=True
-        )
 
         return {"message": "บันทึกการตั้งค่าสำเร็จ"}
 

@@ -550,8 +550,9 @@ def test_student_reschedule_success_full_side_effects(rs_ctx):
     assert mongo["BORC"]["QueueManagementHistory"].count_documents({"status": "Rescheduled"}) >= 1
     assert len(notified) == 1
     assert notified[0][0].endswith("/NotifyQueueAdivsor/RecheduleAdvisor")
-    # เลื่อนคิว: แจ้งฝั่งตรงข้ามเท่านั้น (นักศึกษาเลื่อน → อาจารย์) ไม่มี StudentId
-    assert notified[0][1] == {"AdvisorId": "advisor-1", "StudentName": "นาย ทดสอบ ระบบ",
+    # payload ระบุทั้ง StudentId และ AdvisorId (ChatBot รับ key StudentId/AdvisorId)
+    assert notified[0][1] == {"AdvisorId": "advisor-1", "StudentId": "student-1", "StudentName": "นาย ทดสอบ ระบบ",
+                              "AdvisorName": "อ.ทดสอบ", "ResearchTopic": "T",
                               "Date": FUTURE2, "Time": "10:00-11:00", "Status": "Rescheduled"}
     # แจ้งเตือนในแอปก็เฉพาะอาจารย์ (หัวข้อ = ชื่อนักศึกษา)
     rows = list(mongo["BORC"]["QueueManagementHistory"].find({"status": "Rescheduled"}))
@@ -640,8 +641,9 @@ def test_advisor_reschedule_success_full_side_effects(ra_ctx):
     assert (h["rescheduledById"], h["rescheduledByRole"], h["studentId"]) == ("advisor-1", "Advisor", "student-1")
     assert len(notified) == 1
     assert notified[0][0].endswith("/NotifyQueueStudent/RecheduleStudent")
-    # เลื่อนคิว: แจ้งฝั่งตรงข้ามเท่านั้น (อาจารย์เลื่อน → นักศึกษา) พร้อมชื่ออาจารย์ให้นักศึกษาเห็น ไม่มี AdvisorId
-    assert notified[0][1] == {"UserId": "student-1", "AdvisorName": "อ.ทดสอบ", "StudentName": "นาย ทดสอบ ระบบ",
+    # payload ระบุทั้ง StudentId และ AdvisorId (ChatBot รับ key StudentId/AdvisorId) พร้อมชื่ออาจารย์ให้นักศึกษาเห็น
+    assert notified[0][1] == {"StudentId": "student-1", "AdvisorId": "advisor-1", "AdvisorName": "อ.ทดสอบ",
+                              "StudentName": "นาย ทดสอบ ระบบ", "ResearchTopic": "T",
                               "Date": FUTURE2, "Time": "10:00-11:00", "Status": "Rescheduled"}
     # แจ้งเตือนในแอปก็เฉพาะนักศึกษา (หัวข้อ = ชื่ออาจารย์)
     rows = list(mongo["BORC"]["QueueManagementHistory"].find({"status": "Rescheduled"}))

@@ -2,13 +2,14 @@ import logging
 
 logger = logging.getLogger(__name__)
 from fastapi import APIRouter, Depends, HTTPException, Request, status, Response
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, StrictInt, field_validator
 from typing import Optional
 from pymongo.errors import DuplicateKeyError
 from users.Database.ConnectDB import Connect_MongoDB
 import os
 from datetime import datetime, timezone
 from common.consent import consent_fields, validate_consent_version
+from common.year_level import YEAR_LEVELS, parse_year_level, year_level_for_storage
 from common.jwt_utils import encode_token
 from common.rate_limit import limit
 from common.url_safety import UnsafeUrl, validate_https_url
@@ -65,6 +66,9 @@ class DataProfile(BaseModel):
     faculty   : str
     department: str
     imageURL  : Optional[str] = "line"
+    # ชั้นปี 1-4 (นักศึกษา) ตามที่เลือกในหน้า ProfileSetup: รับทั้งข้อความ "2" และตัวเลข 2
+    # ไม่บังคับที่ backend: อาจารย์ไม่มีชั้นปี และ client รุ่นเก่าที่ไม่ส่งมายังสมัครได้ ("" หรือไม่ส่ง = ไม่ระบุ)
+    yearLevel : Optional[StrictInt | str] = None
     # ต้องยินยอมนโยบายความเป็นส่วนตัวก่อนสมัคร (บังคับ) — เวลาที่ยินยอม backend บันทึกเองจากเวลาเซิร์ฟเวอร์
     consentVersion: str
 
@@ -97,6 +101,16 @@ class DataProfile(BaseModel):
             return validate_https_url(value)
         except UnsafeUrl as exc:
             raise ValueError(str(exc)) from None
+
+    @field_validator("yearLevel", mode="after")
+    @classmethod
+    def _year_level_must_be_offered(cls, value):
+        if value is None or value == "":
+            return None
+        parsed = parse_year_level(value)
+        if parsed is None:
+            raise ValueError("ชั้นปีต้องเป็น 1 ถึง %d" % max(YEAR_LEVELS))
+        return parsed
 
     @field_validator("faculty", mode="after")
     @classmethod
@@ -135,6 +149,8 @@ def AddData_Database(client_data, data: DataProfile):
         # Role ว่างเสมอตอนสมัครเอง — Admin เป็นคนกำหนดทีหลังตอน Approve
         "Role"          : "",
         "Status"        : "Pending",
+        # เก็บเป็นข้อความ "1"-"4" ตามที่เลือกในหน้า ProfileSetup; "" = ไม่ระบุ (อาจารย์ / ไม่ได้เลือก) — ลำดับฟิลด์ตามเอกสารเดิมใน Atlas
+        "YearLevel"     : year_level_for_storage(data.yearLevel),
         "Faculty"       : data.faculty,
         "Department"    : data.department,
         "isActive"      : True,
