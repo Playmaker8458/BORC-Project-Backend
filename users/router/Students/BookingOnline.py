@@ -403,8 +403,7 @@ def create_booking(
                 "Time"         : data.time,
                 "Status"       : "Pending"
             },
-            CHATBOT_INTERNAL_HEADERS,
-            8,
+            CHATBOT_INTERNAL_HEADERS    
         )
 
         return {"message": "เสร็จสิ้นการจองคิวให้คำปรึกษา"}

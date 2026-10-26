@@ -2,17 +2,16 @@ import logging
 
 logger = logging.getLogger(__name__)
 from fastapi import APIRouter, Depends, HTTPException, Request, status, Response, BackgroundTasks
-from pydantic import BaseModel, StrictInt, field_validator
+from pydantic import BaseModel, StrictInt
 from typing import Optional
 from pymongo.errors import DuplicateKeyError
 from users.Database.ConnectDB import Connect_MongoDB
 import os
 from datetime import datetime, timezone
-from common.consent import consent_fields, validate_consent_version
-from common.year_level import YEAR_LEVELS, parse_year_level, year_level_for_storage
+from common.consent import consent_fields
+from common.year_level import year_level_for_storage
 from common.jwt_utils import encode_token
 from common.rate_limit import limit
-from common.url_safety import UnsafeUrl, validate_https_url
 from users.auth.authUser import verify_pending_or_active_user, set_user_session, SESSION_MAX_AGE
 
 from common.notify import CHATBOT_INTERNAL_HEADERS, CHATBOT_URL, notify_chatbot
@@ -25,33 +24,6 @@ chatbot_uri = CHATBOT_URL
 COOKIE_NAME = "access_token"
 IS_PROD = os.getenv("ENV") == "production"
 
-# คณะ/สาขา ที่เปิดรับสมัครจริง — ต้องตรงกับรายการฝั่ง frontend
-# (frontend: src/lib/constants/profile.ts: FACULTIES) หน้าที่นี้ไม่ยอมรับค่าที่ไม่อยู่ใน
-# รายการนี้ เพื่อกัน user ยิง faculty/department มั่ว ๆ เข้า DB ตรง ๆ ผ่าน API
-FACULTIES: dict[str, list[str]] = {
-    "วิทยาศาสตร์": [
-        "วิทยาการคอมพิวเตอร์และปัญญาประดิษฐ์",
-        "การประกอบอาหารและการจัดการงานครัว",
-        "วิทยาศาสตร์การกีฬาและการออกกำลังกาย",
-        "เทคโนโลยีสารสนเทศและนวัตกรรมดิจิทัล",
-        "การจัดการสิ่งแวดล้อมและความปลอดภัย",
-        "วิศวกรรมการผลิตและการจัดการพลังงาน",
-        "วิศวกรรมโยธาและบริหารงานก่อสร้าง",
-        "เทคโนโลยีอิเล็กทรอนิกส์อัจฉริยะและหุ่นยนต์",
-        "คณิตศาสตร์ (ค.บ. 4 ปี)",
-        "วิทยาศาสตร์ทั่วไป (ค.บ. 4 ปี)",
-        "เคมี (ค.บ. 4 ปี)",
-        "ชีววิทยา (ค.บ. 4 ปี)",
-        "คอมพิวเตอร์ (ค.บ. 4 ปี)",
-        "มัลติมีเดียและอีสปอร์ต",
-        "การประกันภัยและการบริหารความเสี่ยง",
-        "การแพทย์แผนจีน",
-    ],
-}
-
-_MAX_NAME_LEN = 100
-_MAX_IMAGE_URL_LEN = 500
-
 
 class DataProfile(BaseModel):
     prefix    : str
@@ -63,61 +35,6 @@ class DataProfile(BaseModel):
     imageURL  : Optional[str] = "line"
     yearLevel : Optional[StrictInt | str] = None
     consentVersion: str
-
-    @field_validator("consentVersion", mode="after")
-    @classmethod
-    def _consent_version_must_be_current(cls, value: str) -> str:
-        return validate_consent_version(value)
-
-    @field_validator("prefix", "firstname", "lastname", mode="after")
-    @classmethod
-    def _strip_and_bound(cls, value: str) -> str:
-        value = value.strip()
-        if not value:
-            raise ValueError("ห้ามเว้นว่าง")
-        if len(value) > _MAX_NAME_LEN:
-            raise ValueError(f"ความยาวต้องไม่เกิน {_MAX_NAME_LEN} ตัวอักษร")
-        return value
-
-    @field_validator("imageURL", mode="after")
-    @classmethod
-    def _image_url_must_be_safe(cls, value):
-        """รับเฉพาะ "line" (ใช้รูปจาก LINE), ค่าว่าง หรือ https URL ยาว ≤ 500 — ไม่เก็บ javascript:/data:/http:"""
-        if value is None:
-            return "line"
-        if value in ("", "line"):
-            return value
-        if len(value) > _MAX_IMAGE_URL_LEN:
-            raise ValueError(f"imageURL ยาวเกิน {_MAX_IMAGE_URL_LEN} ตัวอักษร")
-        try:
-            return validate_https_url(value)
-        except UnsafeUrl as exc:
-            raise ValueError(str(exc)) from None
-
-    @field_validator("yearLevel", mode="after")
-    @classmethod
-    def _year_level_must_be_offered(cls, value):
-        if value is None or value == "":
-            return None
-        parsed = parse_year_level(value)
-        if parsed is None:
-            raise ValueError("ชั้นปีต้องเป็น 1 ถึง %d" % max(YEAR_LEVELS))
-        return parsed
-
-    @field_validator("faculty", mode="after")
-    @classmethod
-    def _faculty_must_exist(cls, value: str) -> str:
-        if value not in FACULTIES:
-            raise ValueError("ไม่พบคณะที่เลือกในระบบ")
-        return value
-
-    @field_validator("department", mode="after")
-    @classmethod
-    def _department_must_belong_to_faculty(cls, value: str, info) -> str:
-        faculty = info.data.get("faculty")
-        if faculty is None or value not in FACULTIES.get(faculty, []):
-            raise ValueError("สาขาวิชาไม่ตรงกับคณะที่เลือก")
-        return value
 
 
 def AddData_Database(client_data, data):
@@ -207,7 +124,6 @@ async def AddDataProfile(
             },
             CHATBOT_INTERNAL_HEADERS
         )
-
 
         AddData_Database(client_data=myclient, data=data)
 

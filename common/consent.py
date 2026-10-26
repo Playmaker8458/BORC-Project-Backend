@@ -12,13 +12,6 @@ from datetime import datetime, timezone
 CURRENT_CONSENT_VERSION = "1.0"
 
 
-def validate_consent_version(value: str) -> str:
-    value = value.strip()
-    if value != CURRENT_CONSENT_VERSION:
-        raise ValueError("เวอร์ชันนโยบายความเป็นส่วนตัวไม่ถูกต้อง กรุณารีเฟรชหน้าแล้วลองใหม่")
-    return value
-
-
 def consent_fields(now: datetime | None = None) -> dict:
     """ฟิลด์ที่บันทึกลง UserProfile เมื่อผู้ใช้ยินยอมนโยบายเวอร์ชันปัจจุบัน"""
     return {
