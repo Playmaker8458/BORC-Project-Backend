@@ -54,16 +54,6 @@ _MAX_IMAGE_URL_LEN = 500
 
 
 class DataProfile(BaseModel):
-    """Payload ของ endpoint สาธารณะ /AddDataProfile (ผู้ใช้กรอกเองหลัง LINE login)
-
-    ตั้งใจไม่มี field `role` — บทบาท (Student/Advisor) เป็นสิ่งที่ Admin เท่านั้น
-    ที่กำหนดได้ผ่านหน้า ManagementAccount/LoginVerification (ดู
-    Admin/router/ManagementAccount.py: UpdateAccountUser) ไม่ใช่สิ่งที่ผู้สมัคร
-    เลือกเองได้ตอนลงทะเบียน — ถ้ายอมให้ client ส่ง role มาแล้วเก็บตรง ๆ จะเปิดช่อง
-    ให้ user เลือกตั้งตัวเองเป็น Advisor ได้ตั้งแต่ตอนสมัคร (privilege
-    self-assignment) แม้ Admin จะยังต้องกด Approve ก็ตาม.
-    """
-
     prefix    : str
     firstname : str
     lastname  : str
@@ -71,10 +61,7 @@ class DataProfile(BaseModel):
     faculty   : str
     department: str
     imageURL  : Optional[str] = "line"
-    # ชั้นปี 1-4 (นักศึกษา) ตามที่เลือกในหน้า ProfileSetup: รับทั้งข้อความ "2" และตัวเลข 2
-    # ไม่บังคับที่ backend: อาจารย์ไม่มีชั้นปี และ client รุ่นเก่าที่ไม่ส่งมายังสมัครได้ ("" หรือไม่ส่ง = ไม่ระบุ)
     yearLevel : Optional[StrictInt | str] = None
-    # ต้องยินยอมนโยบายความเป็นส่วนตัวก่อนสมัคร (บังคับ) — เวลาที่ยินยอม backend บันทึกเองจากเวลาเซิร์ฟเวอร์
     consentVersion: str
 
     @field_validator("consentVersion", mode="after")
@@ -133,7 +120,7 @@ class DataProfile(BaseModel):
         return value
 
 
-def AddData_Database(client_data, data: DataProfile):
+def AddData_Database(client_data, data):
     db  = client_data["BORC"]
     col = db["UserProfile"]
     existing_user = col.find_one({"userId": data.userID})
@@ -167,20 +154,13 @@ def AddData_Database(client_data, data: DataProfile):
     }
 
     try:
-        result = col.insert_one(new_user)
+        col.insert_one(new_user)
     except DuplicateKeyError:
         # คำขอสมัครซ้ำที่ผ่านการเช็ก find ด้านบนพร้อมกัน (unique index userId ใน common/indexes.py)
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="มีข้อมูลผู้ใช้นี้อยู่ในระบบแล้ว"
         )
-    if not result.inserted_id:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="ไม่สามารถเพิ่มข้อมูลผู้ใช้ได้ กรุณาลองใหม่อีกครั้ง"
-        )
-
-    return new_user
 
 
 @router.post('/AddDataProfile')
@@ -206,11 +186,9 @@ async def AddDataProfile(
 
     myclient = Connect_MongoDB()
     try:
-        new_user = AddData_Database(client_data=myclient, data=data)
-
         token_payload = {
             "user_id"   : data.userID,
-            "role"      : new_user["Role"],
+            "role"      : "",
             "Prefix"    : data.prefix,
             "Firstname" : data.firstname,
             "Lastname"  : data.lastname,
@@ -230,6 +208,9 @@ async def AddDataProfile(
             CHATBOT_INTERNAL_HEADERS
         )
 
+
+        AddData_Database(client_data=myclient, data=data)
+
         # ใช้ SESSION_MAX_AGE เดียวกับ cookie (authUser.set_user_session) — เดิม JWT
         # ในนี้อายุ 7 วันแต่ cookie ถูกลบไปแล้วตั้งแต่วันที่ 1 (max_age=SESSION_MAX_AGE)
         # ทำให้ token ยังใช้ยืนยันตัวตนต่อได้อีก 6 วันถ้าคุกกี้หลุดไปอยู่ในมือคนอื่น
@@ -237,6 +218,7 @@ async def AddDataProfile(
         access_token = encode_token(token_payload, SESSION_MAX_AGE)
 
         set_user_session(request, response, access_token)
+        
 
         return {"message": "เพิ่มข้อมูลผู้ใช้ใหม่เสร็จสิ้น"}
 
