@@ -18,7 +18,6 @@ def validate_consent_version(value: str) -> str:
         raise ValueError("เวอร์ชันนโยบายความเป็นส่วนตัวไม่ถูกต้อง กรุณารีเฟรชหน้าแล้วลองใหม่")
     return value
 
-
 def consent_fields(now: datetime | None = None) -> dict:
     """ฟิลด์ที่บันทึกลง UserProfile เมื่อผู้ใช้ยินยอมนโยบายเวอร์ชันปัจจุบัน"""
     return {

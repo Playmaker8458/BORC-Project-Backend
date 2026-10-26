@@ -75,7 +75,8 @@ def validate_date_format_delete_update(date: str) -> None:
 
 
 def validate_month_format(month: str) -> None:
-    if not re.match(r"^\d{4}-\d{2}$", month):
+    # ASCII + fullmatch + เดือน 01-12: เดิมรับ "2026-13" แล้ว calendar.monthrange โยน error → 500
+    if not re.fullmatch(r"[0-9]{4}-(0[1-9]|1[0-2])", month):
         raise HTTPException(status_code=400, detail="รูปแบบเดือนไม่ถูกต้อง (YYYY-MM)")
 
 

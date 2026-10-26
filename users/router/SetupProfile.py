@@ -2,14 +2,15 @@ import logging
 
 logger = logging.getLogger(__name__)
 from fastapi import APIRouter, Depends, HTTPException, Request, status, Response, BackgroundTasks
-from pydantic import BaseModel, StrictInt
+from pydantic import BaseModel, StrictInt, field_validator, model_validator
 from typing import Optional
 from pymongo.errors import DuplicateKeyError
 from users.Database.ConnectDB import Connect_MongoDB
 import os
 from datetime import datetime, timezone
-from common.consent import consent_fields
-from common.year_level import year_level_for_storage
+from common.consent import consent_fields, validate_consent_version
+from common.url_safety import UnsafeUrl, validate_https_url
+from common.year_level import YEAR_LEVELS, parse_year_level, year_level_for_storage
 from common.jwt_utils import encode_token
 from common.rate_limit import limit
 from users.auth.authUser import verify_pending_or_active_user, set_user_session, SESSION_MAX_AGE
@@ -25,6 +26,23 @@ COOKIE_NAME = "access_token"
 IS_PROD = os.getenv("ENV") == "production"
 
 
+# คณะ -> สาขาที่เลือกได้ตอนสมัคร — ต้องตรงกับ frontend: src/lib/constants/profile.ts: FACULTIES
+FACULTIES = {
+    "วิทยาศาสตร์": [
+        "วิทยาการคอมพิวเตอร์และปัญญาประดิษฐ์", "การประกอบอาหารและการจัดการงานครัว",
+        "วิทยาศาสตร์การกีฬาและการออกกำลังกาย", "เทคโนโลยีสารสนเทศและนวัตกรรมดิจิทัล",
+        "การจัดการสิ่งแวดล้อมและความปลอดภัย", "วิศวกรรมการผลิตและการจัดการพลังงาน",
+        "วิศวกรรมโยธาและบริหารงานก่อสร้าง", "เทคโนโลยีอิเล็กทรอนิกส์อัจฉริยะและหุ่นยนต์",
+        "คณิตศาสตร์ (ค.บ. 4 ปี)", "วิทยาศาสตร์ทั่วไป (ค.บ. 4 ปี)", "เคมี (ค.บ. 4 ปี)",
+        "ชีววิทยา (ค.บ. 4 ปี)", "คอมพิวเตอร์ (ค.บ. 4 ปี)", "มัลติมีเดียและอีสปอร์ต",
+        "การประกันภัยและการบริหารความเสี่ยง", "การแพทย์แผนจีน",
+    ],
+}
+
+_MAX_NAME_LEN = 100       # ตรงกับหน้าแก้ไขโปรไฟล์ (SettingProfile.py)
+_MAX_IMAGE_URL_LEN = 500
+
+
 class DataProfile(BaseModel):
     prefix    : str
     firstname : str
@@ -35,6 +53,51 @@ class DataProfile(BaseModel):
     imageURL  : Optional[str] = "line"
     yearLevel : Optional[StrictInt | str] = None
     consentVersion: str
+
+    @field_validator("prefix", "firstname", "lastname", mode="after")
+    @classmethod
+    def _bounded_name(cls, value: str) -> str:
+        if len(value) > _MAX_NAME_LEN:
+            raise ValueError(f"ความยาวต้องไม่เกิน {_MAX_NAME_LEN} ตัวอักษร")
+        return value
+
+    @field_validator("imageURL", mode="after")
+    @classmethod
+    def _safe_image_url(cls, value):
+        # None/"" /"line" = ไม่มีรูป (ใช้ค่าเริ่มต้น); อย่างอื่นต้องเป็น https ที่ปลอดภัยและไม่ยาวเกิน
+        if value is None:
+            return "line"
+        if value in ("", "line"):
+            return value
+        if len(value) > _MAX_IMAGE_URL_LEN:
+            raise ValueError("ลิงก์รูปภาพยาวเกินไป")
+        try:
+            return validate_https_url(value)
+        except UnsafeUrl as exc:
+            raise ValueError(str(exc)) from None
+
+    @field_validator("yearLevel", mode="after")
+    @classmethod
+    def _year_level_must_be_offered(cls, value):
+        if value is None or value == "":
+            return None
+        parsed = parse_year_level(value)
+        if parsed is None:
+            raise ValueError("ชั้นปีต้องเป็น 1 ถึง %d" % max(YEAR_LEVELS))
+        return parsed
+
+    @field_validator("consentVersion", mode="after")
+    @classmethod
+    def _must_be_current(cls, value: str) -> str:
+        return validate_consent_version(value)
+
+    @model_validator(mode="after")
+    def _department_belongs_to_faculty(self):
+        if self.faculty not in FACULTIES:
+            raise ValueError("ไม่พบคณะที่เลือก")
+        if self.department not in FACULTIES[self.faculty]:
+            raise ValueError("สาขาไม่อยู่ในคณะที่เลือก")
+        return self
 
 
 def AddData_Database(client_data, data):

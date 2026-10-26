@@ -8,7 +8,7 @@ import re
 from itertools import combinations
 from typing import Annotated, Dict, List
 
-from pydantic import AfterValidator, BaseModel, field_validator, model_validator
+from pydantic import AfterValidator, BaseModel, ConfigDict, field_validator, model_validator
 
 # จำนวนช่วงเวลาสูงสุดที่อาจารย์ตั้งได้ต่อวัน (ต้องตรงกับ MAX_SLOTS_PER_DAY ฝั่ง frontend)
 MAX_SLOTS_PER_DAY = 5
@@ -49,8 +49,7 @@ class TimeSlot(BaseModel):
     end  : TimeStr
     max_booking: int = 1
 
-    class Config:
-        extra = "ignore"
+    model_config = ConfigDict(extra="ignore")
 
     @model_validator(mode="after")
     def validate_end_after_start(self):
