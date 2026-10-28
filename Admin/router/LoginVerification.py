@@ -96,17 +96,14 @@ def approve_user(user_id: str, update: ApproveUser, background_tasks: Background
         )
 
         # แจ้งเตือน LINE ทั้งอาจารย์ (มีนักศึกษาขอจอง) และนักศึกษาผู้จอง (ยืนยันว่าส่งคำขอแล้ว) — ทำงานใน background ไม่บล็อก response
-        if update.Role == "Student":
-            background_tasks.add_task(
-                notify_chatbot,
-                f"{chatbot_uri}/NotifyFristLogin/ApprovedUser/student",
-                {
-                    "userId" : user_id,
-                },
-                CHATBOT_INTERNAL_HEADERS
-            )
-        else:
-            pass
+        background_tasks.add_task(
+            notify_chatbot,
+            f"{chatbot_uri}/NotifyFristLogin/UserLine_id",
+            {
+                "userId" : user_id,
+            },
+            CHATBOT_INTERNAL_HEADERS
+        )
 
         return {
             "message":     "อัพเดตข้อมูลสำเร็จ",
