@@ -410,14 +410,16 @@ async def broadcast_chat_appointment(body: ChatBroadcastBody, request: Request):
         now = datetime.now(timezone.utc)
         await _store_link_messages(advisor_id, recipients, url, now)
         await _deliver_to_open_rooms(advisor_id, recipients, url, now)
+
         line_failed = await _notify_line_link(recipients, url) # ส่งข้อมูลการแจ้งเตือนไปยังไลน์
+        advisor_name = await get_nameAdvisor(advisor_id)
 
 
         async with httpx.AsyncClient() as http:
             try:
                 await http.post(
                     SERVER_CHATBOT_URL,
-                    json={"line_user_id": recipients,"url": url, "AdvisorName":get_nameAdvisor(advisor_id) },
+                    json={"line_user_id": recipients,"url": url, "AdvisorName": advisor_name },
                     timeout=5.0,
                     headers=CHATBOT_INTERNAL_HEADERS,
                 )
