@@ -180,7 +180,7 @@ async def AddDataProfile(
 
         background_tasks.add_task(
             notify_chatbot,
-            f"{chatbot_uri}/ApprovedUser/login",
+            f"{chatbot_uri}/NotifyFristLogin/ApprovedUser/login",
             {
                 "userId" : data.userID,
                 "Role" : "Pending"

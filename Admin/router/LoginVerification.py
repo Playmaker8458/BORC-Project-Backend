@@ -99,7 +99,7 @@ def approve_user(user_id: str, update: ApproveUser, background_tasks: Background
         if update.Role == "Student":
             background_tasks.add_task(
                 notify_chatbot,
-                f"{chatbot_uri}/ApprovedUser/student",
+                f"{chatbot_uri}/NotifyFristLogin/ApprovedUser/student",
                 {
                     "userId" : user_id,
                 },
