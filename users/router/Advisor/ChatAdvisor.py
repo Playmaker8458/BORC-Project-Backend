@@ -103,11 +103,17 @@ def _enforce_rate_limit(user_id: str) -> None:
             headers={"Retry-After": str(retry_after_seconds())},
         )
 
+async def get_nameAdvisor(advisor_id: str) -> str | None:
+    profile = await db["UserProfile"].find_one(
+        {"userId": advisor_id}, {"_id": 0, "Firstname": 1}
+    )
+    return profile.get("Firstname") if profile else None
 
 def _allowed_link_hosts() -> list[str]:
     """CHAT_LINK_ALLOWED_HOSTS (คั่นด้วยจุลภาค) จำกัดโดเมนของลิงก์นัดหมาย; ว่าง = ไม่จำกัดโดเมน"""
     raw = os.getenv("CHAT_LINK_ALLOWED_HOSTS") or ""
     return [h.strip() for h in raw.split(",") if h.strip()]
+
 
 
 # ── ห้องแชท: เก็บ connection ที่เปิดอยู่ แยกตามคู่ (นักศึกษา, อาจารย์) ──────────────────────
@@ -411,7 +417,7 @@ async def broadcast_chat_appointment(body: ChatBroadcastBody, request: Request):
             try:
                 await http.post(
                     SERVER_CHATBOT_URL,
-                    json={"line_user_id": recipients, "url": url},
+                    json={"line_user_id": recipients,"url": url, "AdvisorName":get_nameAdvisor(advisor_id) },
                     timeout=5.0,
                     headers=CHATBOT_INTERNAL_HEADERS,
                 )
