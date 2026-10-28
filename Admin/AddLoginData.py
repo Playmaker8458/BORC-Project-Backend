@@ -5,6 +5,10 @@ from dotenv import load_dotenv
 from Database.ConnectDB import Connect_MongoDB
 from password_check import hash_password
 
+# สิทธิ์ทั้งหมดต้องตรงกับ ADMIN_PERMISSIONS ใน Admin/auth/authAdmin.py (ไฟล์นี้รันเดี่ยวก่อน uvicorn จึงไม่ import ข้ามแพ็กเกจ)
+ADMIN_PERMISSIONS = ("verify", "manage", "history", "add")
+TOP_ADMIN_LEVEL = "high"  # ป้ายผู้ดูแลระบบหลัก (กำหนดให้เลือกเองไม่ได้ — ADMIN_LEVELS ใน admin_account_rules.py มีแค่ mid/low)
+
 # เข้าถึงตัวแปลในไฟล์ .env เพื่อดึงมาใช้งานในไฟล์ AddLoginData.py แบบ Local
 load_dotenv()
 
@@ -52,15 +56,38 @@ def Add_LoginData(email: str, plain_password: str) -> bool:
         return False
 
     # เข้ารหัสผ่านด้วย bcrypt ในไฟล์ password_check (ทำเฉพาะตอนต้องสร้างจริง)
-    mycol.insert_one({"Email": email, "Password": hash_password(plain_password)})
+    # บัญชีแรก = ผู้ดูแลระบบหลัก: เก็บสิทธิ์ครบทุกข้อและป้ายระดับไว้ในฐานข้อมูลตั้งแต่ต้น ไม่พึ่งการ "ไม่มีฟิลด์ = ได้ทุกสิทธิ์"
+    mycol.insert_one({
+        "Email": email,
+        "Password": hash_password(plain_password),
+        "Permissions": list(ADMIN_PERMISSIONS),
+        "Level": TOP_ADMIN_LEVEL,
+    })
     logger.info("เพิ่มข้อมูลในตาราง LoginAdmin ในฐานข้อมูล BORC สำเร็จแล้ว")
     return True
+
+
+def backfill_legacy_admins() -> int:
+    """เติม Permissions (ครบทุกสิทธิ์ ตรงกับความหมายเดิมของ "ไม่มีฟิลด์") ให้แอดมินเดิมที่ยังไม่มี
+    และเติม Level ให้เฉพาะบัญชีแรกสุดของระบบที่ยังไม่มีทั้งสองฟิลด์ ทำซ้ำได้ ไม่ทับค่าที่ตั้งไว้แล้ว"""
+    col = Connect_MongoDB()["BORC"]["LoginAdmin"]
+    legacy = {"$or": [{"Permissions": {"$exists": False}}, {"Permissions": None}]}
+
+    first = col.find_one({}, sort=[("_id", 1)])
+    if first is not None and "Level" not in first and (first.get("Permissions") is None):
+        col.update_one({"_id": first["_id"]}, {"$set": {"Level": TOP_ADMIN_LEVEL}})
+
+    result = col.update_many(legacy, {"$set": {"Permissions": list(ADMIN_PERMISSIONS)}})
+    if result.modified_count:
+        logger.info("เติมสิทธิ์ให้แอดมินเดิม %d บัญชี", result.modified_count)
+    return result.modified_count
 
 
 def main(env=None) -> bool:
     """seed แอดมินตัวแรก; ถ้ามีแอดมินอยู่แล้วไม่ต้องมี EMAIL_LOGIN/PASSWORD_LOGIN เลย (เดิมต้องมีทุกครั้งที่ container เริ่ม)"""
     if Connect_MongoDB()["BORC"]["LoginAdmin"].find_one() is not None:
         logger.info("มีแอดมินอยู่ในระบบแล้ว ข้ามการ seed")
+        backfill_legacy_admins()
         return False
     email, password = load_seed_credentials(env)
     return Add_LoginData(email, password)
