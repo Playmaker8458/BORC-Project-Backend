@@ -101,6 +101,7 @@ def approve_user(user_id: str, update: ApproveUser, background_tasks: Background
             f"{chatbot_uri}/NotifyFristLogin/UserLine_id",
             {
                 "userId" : user_id,
+                "Firstname" : user.get("Firstname", ""),
             },
             CHATBOT_INTERNAL_HEADERS
         )
