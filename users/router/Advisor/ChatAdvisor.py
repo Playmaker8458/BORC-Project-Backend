@@ -406,6 +406,18 @@ async def broadcast_chat_appointment(body: ChatBroadcastBody, request: Request):
         await _deliver_to_open_rooms(advisor_id, recipients, url, now)
         line_failed = await _notify_line_link(recipients, url) # ส่งข้อมูลการแจ้งเตือนไปยังไลน์
 
+
+        async with httpx.AsyncClient() as http:
+            try:
+                await http.post(
+                    SERVER_CHATBOT_URL,
+                    json={"line_user_id": recipients, "url": url},
+                    timeout=5.0,
+                    headers=CHATBOT_INTERNAL_HEADERS,
+                )
+            except httpx.RequestError as exc:
+                logger.warning(f"[WARN] Server 5000 ติดต่อไม่ได้: {exc}")
+
         return {
             "message": "ส่งลิงก์นัดหมายสำเร็จ",
             "total": len(recipients),
