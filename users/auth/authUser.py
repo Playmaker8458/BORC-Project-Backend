@@ -13,10 +13,7 @@ from common.cookies import cookie_security_flags
 from common.jwt_utils import encode_token, decode_token, JWTError
 from common.user_cache import cache_get, cache_put, invalidate_user_cache  # noqa: F401  (re-export)
 from common.rate_limit import limit
-from .line_oauth import (  # noqa: F401  (re-export: LINE_LOGIN_* kept for any external reference)
-    LINE_LOGIN_CHANNEL_ID,
-    LINE_LOGIN_CHANNEL_SECRET,
-    LINE_LOGIN_REDIRECT_URI,
+from .line_oauth import (  
     exchange_code_for_access_token,
     verify_line_token,
 )
